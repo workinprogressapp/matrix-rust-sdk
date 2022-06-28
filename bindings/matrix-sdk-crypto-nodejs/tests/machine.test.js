@@ -13,17 +13,17 @@ describe(OlmMachine.name, () => {
     });
 
     describe('can be instantiated with a store', () => {
+        test('with a passphrase', async () => {
+            const temp_directory = await fs.mkdtemp(path.join(os.tmpdir(), 'matrix-sdk-crypto--'));
+
+            expect(await OlmMachine.initialize(new UserId('@foo:bar.org'), new DeviceId('baz'), temp_directory, 'hello')).toBeInstanceOf(OlmMachine);
+        });
         test('with no passphrase', async () => {
             const temp_directory = await fs.mkdtemp(path.join(os.tmpdir(), 'matrix-sdk-crypto--'));
 
             expect(await OlmMachine.initialize(new UserId('@foo:bar.org'), new DeviceId('baz'), temp_directory)).toBeInstanceOf(OlmMachine);
         });
 
-        test('with a passphrase', async () => {
-            const temp_directory = await fs.mkdtemp(path.join(os.tmpdir(), 'matrix-sdk-crypto--'));
-
-            expect(await OlmMachine.initialize(new UserId('@foo:bar.org'), new DeviceId('baz'), temp_directory, 'hello')).toBeInstanceOf(OlmMachine);
-        });
     });
     
     const user = new UserId('@alice:example.org');
