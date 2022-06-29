@@ -42,7 +42,7 @@ jobs:
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: nightly
           profile: minimal
           override: true
 
@@ -60,6 +60,8 @@ jobs:
 
       - name: Build the Node.js binding
         working-directory: ${{ env.MATRIX_SDK_CRYPTO_NODEJS_PATH }}
+        env:
+          RUSTFLAGS: "-Zunstable-options -Csplit-debuginfo"
         run: npm run build
 
       - name: Test the Node.js binding
@@ -70,10 +72,10 @@ jobs:
         if: ${{ failure() }}
         uses: mxschmitt/action-tmate@v3
 
-      - if: ${{ matrix.build-doc }}
-        name: Build the documentation
-        working-directory: ${{ env.MATRIX_SDK_CRYPTO_NODEJS_PATH }}
-        run: npm run doc
+      # - if: ${{ matrix.build-doc }}
+      #   name: Build the documentation
+      #   working-directory: ${{ env.MATRIX_SDK_CRYPTO_NODEJS_PATH }}
+      #   run: npm run doc
 
   # test-matrix-sdk-crypto-js:
   #   name: 🕸 [m]-crypto-js
