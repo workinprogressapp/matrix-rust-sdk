@@ -11,6 +11,7 @@ pub mod messages;
 pub mod room;
 pub mod session_verification;
 pub mod sliding_sync;
+mod executor;
 mod uniffi_api;
 
 use std::io;
@@ -20,12 +21,11 @@ use client_builder::ClientBuilder;
 use matrix_sdk::Session;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
+use executor::Executor;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 pub use uniffi_api::*;
 
-pub static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Can't start Tokio runtime"));
+pub static RUNTIME: Lazy<Executor> = Lazy::new(|| Executor::default());
 
 pub use matrix_sdk::ruma::{api::client::account::register, UserId};
 

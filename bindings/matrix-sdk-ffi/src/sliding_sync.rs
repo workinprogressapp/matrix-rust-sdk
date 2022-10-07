@@ -16,21 +16,21 @@ pub use matrix_sdk::{
     Client as MatrixClient, RoomListEntry as MatrixRoomEntry,
     SlidingSyncBuilder as MatrixSlidingSyncBuilder, SlidingSyncMode, SlidingSyncState,
 };
-use tokio::task::JoinHandle;
+use crate::executor::Task;
 
 use super::{Client, Room, RUNTIME};
 use crate::{helpers::unwrap_or_clone_arc, messages::AnyMessage};
 
 pub struct StoppableSpawn {
-    handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    handle: Arc<RwLock<Option<Task<()>>>>,
 }
 
 impl StoppableSpawn {
-    fn with_handle(handle: JoinHandle<()>) -> StoppableSpawn {
+    fn with_handle(handle: Task<()>) -> StoppableSpawn {
         StoppableSpawn { handle: Arc::new(RwLock::new(Some(handle))) }
     }
 
-    fn with_handle_ref(handle: Arc<RwLock<Option<JoinHandle<()>>>>) -> StoppableSpawn {
+    fn with_handle_ref(handle: Arc<RwLock<Option<Task<()>>>>) -> StoppableSpawn {
         StoppableSpawn { handle }
     }
 }
@@ -39,7 +39,7 @@ impl StoppableSpawn {
 impl StoppableSpawn {
     pub fn cancel(&self) {
         if let Some(handle) = self.handle.write().unwrap().take() {
-            handle.abort();
+            RUNTIME.block_on(handle.cancel());
         }
     }
     pub fn is_cancelled(&self) -> bool {
@@ -427,7 +427,7 @@ pub struct SlidingSync {
     inner: matrix_sdk::SlidingSync,
     client: Client,
     observer: Arc<RwLock<Option<Box<dyn SlidingSyncObserver>>>>,
-    sync_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
+    sync_handle: Arc<RwLock<Option<Task<()>>>>,
 }
 
 impl SlidingSync {
@@ -501,13 +501,14 @@ impl SlidingSync {
         let inner_spawn = spawn.clone();
         {
             let mut sync_handle = self.sync_handle.write().unwrap();
-
-            if let Some(handle) = sync_handle.take() {
-                handle.abort();
-            }
+            let handle = sync_handle.take();
 
             *sync_handle = Some(RUNTIME.spawn(async move {
                 let stream = inner.stream().await.unwrap();
+
+                if let Some(handle) = handle {
+                    handle.cancel().await;
+                }
                 pin_mut!(stream);
                 loop {
                     let update = match stream.next().await {
