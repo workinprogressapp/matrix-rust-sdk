@@ -10,7 +10,8 @@ rust-version = "1.56"
 repository = "https://github.com/matrix-org/matrix-rust-sdk"
 
 [features]
-default = ["with-tokio"]
+default = ["with-dispatch"] #["with-tokio"]
+with-dispatch = ["dep:dispatch", "dep:async-executor", "dep:async-task"]
 with-tokio = ["dep:tokio"]
 
 [lib]
@@ -22,7 +23,7 @@ uniffi_build = { git = "https://github.com/mozilla/uniffi-rs", rev = "17ee82b50a
 [dependencies]
 anyhow = "1.0.51"
 extension-trait = "1.0.1"
-futures-core = "0.3.17"
+futures-lite = "1.12.0"
 futures-signals = { version = "0.3.28" }
 futures-util = { version = "0.3.17", default-features = false }
 # FIXME: we currently can't feature flag anything in the api.udl, therefore we must enforce sliding-sync being exposed here..
@@ -40,5 +41,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uniffi = { git = "https://github.com/mozilla/uniffi-rs", rev = "17ee82b50ab01182b09a3597b3a340baeca1c9a8" }
 uniffi_macros = { git = "https://github.com/mozilla/uniffi-rs", rev = "17ee82b50ab01182b09a3597b3a340baeca1c9a8" }
 
-### OPTIONAL
+### OPTIONAL EXECUTORS
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+
+dispatch = { version = "0.2.0", optional = true }
+async-executor = { version = "1.4.1", optional = true }
+async-task = { version = "4.0.0", optional = true }

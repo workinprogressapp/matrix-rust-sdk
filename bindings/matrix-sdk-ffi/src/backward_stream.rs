@@ -1,7 +1,7 @@
 use core::pin::Pin;
 use std::sync::Arc;
 
-use futures_core::Stream;
+use futures_lite::stream::Stream;
 use matrix_sdk::{deserialized_responses::SyncTimelineEvent, locks::Mutex, Result};
 use tokio_stream::StreamExt;
 use tracing::error;
