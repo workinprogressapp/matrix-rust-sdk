@@ -23,6 +23,7 @@ pub use matrix_sdk_base::{
     StateChanges, StoreError,
 };
 pub use matrix_sdk_common::*;
+#[cfg(feature = "reqwest")]
 pub use reqwest;
 #[doc(no_inline)]
 pub use ruma;

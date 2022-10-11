@@ -21,14 +21,29 @@ fn ensure(cond: bool, err: &str) {
 fn main() {
     let native_tls_set = env_is_set("CARGO_FEATURE_NATIVE_TLS");
     let rustls_tls_set = env_is_set("CARGO_FEATURE_RUSTLS_TLS");
-    ensure(
-        native_tls_set || rustls_tls_set,
-        "one of the features 'native-tls' or 'rustls-tls' must be enabled",
-    );
-    ensure(
-        !native_tls_set || !rustls_tls_set,
-        "only one of the features 'native-tls' or 'rustls-tls' can be enabled",
-    );
+
+    let native_reqwest_set = env_is_set("CARGO_FEATURE_REQWEST");
+    if native_reqwest_set {
+        ensure(
+            native_tls_set || rustls_tls_set,
+            "one of the features 'native-tls' or 'rustls-tls' must be enabled when reqwest is enabled",
+        );
+        ensure(
+            !native_tls_set || !rustls_tls_set,
+            "only one of the features 'native-tls' or 'rustls-tls' can be enabledd when reqwest is enabled",
+        );
+    }
+    let native_isahc_set = env_is_set("CARGO_FEATURE_ISAHC");
+    if native_isahc_set {
+        ensure(
+            native_tls_set || rustls_tls_set,
+            "one of the features 'native-tls' or 'rustls-tls' must be enabled when isahc is enabled",
+        );
+        ensure(
+            !native_tls_set || !rustls_tls_set,
+            "only one of the features 'native-tls' or 'rustls-tls' can be enabledd when isahc is enabled",
+        );
+    }
 
     let is_wasm = env::var_os("CARGO_CFG_TARGET_ARCH").map_or(false, |arch| arch == "wasm32");
     if is_wasm {

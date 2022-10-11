@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use http::Response as HttpResponse;
 use matrix_sdk_common::AsyncTraitDeps;
-use reqwest::Response;
 use ruma::{
     api::{
         error::FromHttpResponseError, AuthScheme, IncomingResponse, MatrixVersion, OutgoingRequest,
@@ -199,134 +198,292 @@ impl Default for HttpSettings {
     }
 }
 
-impl HttpSettings {
-    /// Build a client with the specified configuration.
-    pub(crate) fn make_client(&self) -> Result<reqwest::Client, HttpError> {
-        #[allow(unused_mut)]
-        let mut http_client = reqwest::Client::builder();
+#[cfg(feature = "reqwest")]
+mod reqwest_impl {
+    use super::*;
+    use reqwest::Response;
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if self.disable_ssl_verification {
-                http_client = http_client.danger_accept_invalid_certs(true)
-            }
+    impl HttpSettings {
+        /// Build a client with the specified configuration.
+        #[cfg(feature = "reqwest")]
+        pub(crate) fn make_client(&self) -> Result<reqwest::Client, HttpError> {
+            #[allow(unused_mut)]
+            let mut http_client = reqwest::Client::builder();
 
-            if let Some(p) = &self.proxy {
-                http_client = http_client.proxy(reqwest::Proxy::all(p.as_str())?);
-            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if self.disable_ssl_verification {
+                    http_client = http_client.danger_accept_invalid_certs(true)
+                }
 
-            let user_agent =
-                self.user_agent.clone().unwrap_or_else(|| "matrix-rust-sdk".to_owned());
+                if let Some(p) = &self.proxy {
+                    http_client = http_client.proxy(reqwest::Proxy::all(p.as_str())?);
+                }
 
-            http_client = http_client.user_agent(user_agent).timeout(self.timeout);
-        };
+                let user_agent =
+                    self.user_agent.clone().unwrap_or_else(|| "matrix-rust-sdk".to_owned());
 
-        Ok(http_client.build()?)
-    }
-}
+                http_client = http_client.user_agent(user_agent).timeout(self.timeout);
+            };
 
-async fn response_to_http_response(
-    mut response: Response,
-) -> Result<http::Response<Bytes>, reqwest::Error> {
-    let status = response.status();
-
-    let mut http_builder = HttpResponse::builder().status(status);
-    let headers = http_builder.headers_mut().expect("Can't get the response builder headers");
-
-    for (k, v) in response.headers_mut().drain() {
-        if let Some(key) = k {
-            headers.insert(key, v);
+            Ok(http_client.build()?)
         }
     }
 
-    let body = response.bytes().await?;
+    async fn response_to_http_response(
+        mut response: Response,
+    ) -> Result<http::Response<Bytes>, reqwest::Error> {
+        let status = response.status();
 
-    Ok(http_builder.body(body).expect("Can't construct a response using the given body"))
-}
+        let mut http_builder = HttpResponse::builder().status(status);
+        let headers = http_builder.headers_mut().expect("Can't get the response builder headers");
 
-#[cfg(any(target_arch = "wasm32"))]
-async fn send_request(
-    client: &reqwest::Client,
-    request: http::Request<Bytes>,
-    _: RequestConfig,
-) -> Result<http::Response<Bytes>, HttpError> {
-    let request = reqwest::Request::try_from(request)?;
-    let response = client.execute(request).await?;
-
-    Ok(response_to_http_response(response).await?)
-}
-
-#[cfg(all(not(target_arch = "wasm32")))]
-async fn send_request(
-    client: &reqwest::Client,
-    request: http::Request<Bytes>,
-    config: RequestConfig,
-) -> Result<http::Response<Bytes>, HttpError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    use backoff::{future::retry, Error as RetryError, ExponentialBackoff};
-    use http::StatusCode;
-
-    let mut backoff = ExponentialBackoff::default();
-    let mut request = reqwest::Request::try_from(request)?;
-    let retry_limit = config.retry_limit;
-    let retry_count = AtomicU64::new(1);
-
-    *request.timeout_mut() = Some(config.timeout);
-
-    backoff.max_elapsed_time = config.retry_timeout;
-
-    let request = &request;
-    let retry_count = &retry_count;
-
-    let request = || async move {
-        let stop = if let Some(retry_limit) = retry_limit {
-            retry_count.fetch_add(1, Ordering::Relaxed) >= retry_limit
-        } else {
-            false
-        };
-
-        // Turn errors into permanent errors when the retry limit is reached
-        let error_type = if stop {
-            RetryError::Permanent
-        } else {
-            |err| RetryError::Transient { err, retry_after: None }
-        };
-
-        let request = request.try_clone().ok_or(HttpError::UnableToCloneRequest)?;
-
-        let response =
-            client.execute(request).await.map_err(|e| error_type(HttpError::Reqwest(e)))?;
-
-        let status_code = response.status();
-        // TODO TOO_MANY_REQUESTS will have a retry timeout which we should
-        // use.
-        if !stop
-            && (status_code.is_server_error() || response.status() == StatusCode::TOO_MANY_REQUESTS)
-        {
-            return Err(error_type(HttpError::Server(status_code)));
+        for (k, v) in response.headers_mut().drain() {
+            if let Some(key) = k {
+                headers.insert(key, v);
+            }
         }
 
-        let response = response_to_http_response(response)
-            .await
-            .map_err(|e| RetryError::Permanent(HttpError::Reqwest(e)))?;
+        let body = response.bytes().await?;
 
-        Ok(response)
-    };
+        Ok(http_builder.body(body).expect("Can't construct a response using the given body"))
+    }
 
-    let response = retry(backoff, request).await?;
-
-    Ok(response)
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl HttpSend for reqwest::Client {
+    #[cfg(any(target_arch = "wasm32"))]
     async fn send_request(
-        &self,
+        client: &reqwest::Client,
+        request: http::Request<Bytes>,
+        _: RequestConfig,
+    ) -> Result<http::Response<Bytes>, HttpError> {
+        let request = reqwest::Request::try_from(request)?;
+        let response = client.execute(request).await?;
+
+        Ok(response_to_http_response(response).await?)
+    }
+
+    #[cfg(all(not(target_arch = "wasm32")))]
+    async fn send_request(
+        client: &reqwest::Client,
         request: http::Request<Bytes>,
         config: RequestConfig,
     ) -> Result<http::Response<Bytes>, HttpError> {
-        send_request(self, request, config).await
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use backoff::{future::retry, Error as RetryError, ExponentialBackoff};
+        use http::StatusCode;
+
+        let mut backoff = ExponentialBackoff::default();
+        let mut request = reqwest::Request::try_from(request)?;
+        let retry_limit = config.retry_limit;
+        let retry_count = AtomicU64::new(1);
+
+        *request.timeout_mut() = Some(config.timeout);
+
+        backoff.max_elapsed_time = config.retry_timeout;
+
+        let request = &request;
+        let retry_count = &retry_count;
+
+        let request = || async move {
+            let stop = if let Some(retry_limit) = retry_limit {
+                retry_count.fetch_add(1, Ordering::Relaxed) >= retry_limit
+            } else {
+                false
+            };
+
+            // Turn errors into permanent errors when the retry limit is reached
+            let error_type = if stop {
+                RetryError::Permanent
+            } else {
+                |err| RetryError::Transient { err, retry_after: None }
+            };
+
+            let request = request.try_clone().ok_or(HttpError::UnableToCloneRequest)?;
+
+            let response =
+                client.execute(request).await.map_err(|e| error_type(HttpError::Reqwest(e)))?;
+
+            let status_code = response.status();
+            // TODO TOO_MANY_REQUESTS will have a retry timeout which we should
+            // use.
+            if !stop
+                && (status_code.is_server_error() || response.status() == StatusCode::TOO_MANY_REQUESTS)
+            {
+                return Err(error_type(HttpError::Server(status_code)));
+            }
+
+            let response = response_to_http_response(response)
+                .await
+                .map_err(|e| RetryError::Permanent(HttpError::Reqwest(e)))?;
+
+            Ok(response)
+        };
+
+        let response = retry(backoff, request).await?;
+
+        Ok(response)
     }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl HttpSend for reqwest::Client {
+        async fn send_request(
+            &self,
+            request: http::Request<Bytes>,
+            config: RequestConfig,
+        ) -> Result<http::Response<Bytes>, HttpError> {
+            send_request(self, request, config).await
+        }
+    }
+
+
 }
+
+#[cfg(feature = "reqwest")]
+pub use reqwest_impl::*;
+
+
+#[cfg(feature = "isahc")]
+mod isahc_impl {
+    use super::*;
+    use isahc::{prelude::*, Response, AsyncBody};
+
+    impl HttpSettings {
+        /// Build a client with the specified configuration.
+        #[cfg(feature = "isahc")]
+        pub(crate) fn make_client(&self) -> Result<isahc::HttpClient, HttpError> {
+            #[allow(unused_mut)]
+            let mut http_client = isahc::HttpClient::builder();
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // if self.disable_ssl_verification {
+                //     http_client = http_client.danger_accept_invalid_certs(true)
+                // }
+
+                // if let Some(p) = &self.proxy {
+                //     http_client = http_client.proxy(p);
+                // }
+
+                // let user_agent =
+                //     self.user_agent.clone().unwrap_or_else(|| "matrix-rust-sdk".to_owned());
+
+                // http_client = http_client.user_agent(user_agent).timeout(self.timeout);
+            };
+
+            Ok(http_client.build()?)
+        }
+    }
+
+    async fn response_to_http_response(
+        mut response: Response<AsyncBody>,
+    ) -> Result<http::Response<Bytes>, isahc::Error> {
+        let status = response.status();
+
+        let mut http_builder = HttpResponse::builder().status(status);
+        let headers = http_builder.headers_mut().expect("Can't get the response builder headers");
+
+        for (k, v) in response.headers_mut().drain() {
+            if let Some(key) = k {
+                headers.insert(key, v);
+            }
+        }
+
+        let body = response.bytes().await?;
+
+        Ok(http_builder.body(body.into()).expect("Can't construct a response using the given body"))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn send_request(
+        client: &isahc::HttpClient,
+        request: http::Request<Bytes>,
+        _: RequestConfig,
+    ) -> Result<http::Response<Bytes>, HttpError> {
+        let request = isahc::Request::try_from(request)?;
+        let response = client.execute(request).await?;
+
+        Ok(response_to_http_response(response).await?)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn send_request(
+        client: &isahc::HttpClient,
+        request: http::Request<Bytes>,
+        config: RequestConfig,
+    ) -> Result<http::Response<Bytes>, HttpError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use backoff::{future::retry, Error as RetryError, ExponentialBackoff};
+        use http::StatusCode;
+
+        let mut backoff = ExponentialBackoff::default();
+        let retry_limit = config.retry_limit;
+        let retry_count = AtomicU64::new(1);
+
+        // request.timeout(config.timeout);
+
+        backoff.max_elapsed_time = config.retry_timeout;
+
+        let request_clone = || {
+            let builder = request.to_builder();
+            builder.body(isahc::AsyncBody::from(request.body().clone().to_vec().as_slice())).unwrap()
+        };
+            
+        let retry_count = &retry_count;
+
+        let request = || async move {
+            let stop = if let Some(retry_limit) = retry_limit {
+                retry_count.fetch_add(1, Ordering::Relaxed) >= retry_limit
+            } else {
+                false
+            };
+
+            // Turn errors into permanent errors when the retry limit is reached
+            let error_type = if stop {
+                RetryError::Permanent
+            } else {
+                |err| RetryError::Transient { err, retry_after: None }
+            };
+
+            let response =
+                client.send_async(request_clone()).await.map_err(|e| error_type(HttpError::Isahc(e)))?;
+
+            let status_code = response.status();
+            // TODO TOO_MANY_REQUESTS will have a retry timeout which we should
+            // use.
+            if !stop
+                && (status_code.is_server_error() || response.status() == StatusCode::TOO_MANY_REQUESTS)
+            {
+                return Err(error_type(HttpError::Server(status_code)));
+            }
+
+            let response = response_to_http_response(response)
+                .await
+                .map_err(|e| RetryError::Permanent(HttpError::Isahc(e)))?;
+
+            Ok(response)
+        };
+
+        let response = retry(backoff, request).await?;
+
+        Ok(response)
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl HttpSend for isahc::HttpClient {
+        async fn send_request(
+            &self,
+            request: http::Request<Bytes>,
+            config: RequestConfig,
+        ) -> Result<http::Response<Bytes>, HttpError> {
+            send_request(self, request, config).await
+        }
+    }
+
+
+}
+
+#[cfg(feature = "isahc")]
+pub use isahc_impl::*;

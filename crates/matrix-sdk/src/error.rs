@@ -24,7 +24,10 @@ use matrix_sdk_base::crypto::{
     CryptoStoreError, DecryptorError, KeyExportError, MegolmError, OlmError,
 };
 use matrix_sdk_base::{Error as SdkBaseError, StoreError};
+#[cfg(feature = "reqwest")]
 use reqwest::Error as ReqwestError;
+#[cfg(feature = "isahc")]
+use isahc::Error as IsahcError;
 use ruma::{
     api::{
         client::uiaa::{UiaaInfo, UiaaResponse as UiaaError},
@@ -61,8 +64,13 @@ pub enum RumaApiError {
 #[derive(Error, Debug)]
 pub enum HttpError {
     /// An error at the HTTP layer.
+    #[cfg(feature = "reqwest")]
     #[error(transparent)]
     Reqwest(#[from] ReqwestError),
+
+    #[cfg(feature = "isahc")]
+    #[error(transparent)]
+    Isahc(#[from] IsahcError),
 
     /// Queried endpoint requires authentication but was called on an anonymous
     /// client.
@@ -304,9 +312,17 @@ impl From<SdkBaseError> for Error {
     }
 }
 
+#[cfg(feature = "reqwest")]
 impl From<ReqwestError> for Error {
     fn from(e: ReqwestError) -> Self {
         Error::Http(HttpError::Reqwest(e))
+    }
+}
+
+#[cfg(feature = "isahc")]
+impl From<IsahcError> for Error {
+    fn from(e: IsahcError) -> Self {
+        Error::Http(HttpError::Isahc(e))
     }
 }
 

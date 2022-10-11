@@ -19,7 +19,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = [
     "e2e-encryption",
     "sled",
+    "reqwest",
     "native-tls",
+]
+
+isahc = [
+    "dep:isahc",
 ]
 
 e2e-encryption = [
@@ -32,11 +37,18 @@ js = ["matrix-sdk-common/js", "matrix-sdk-base/js"]
 sled = ["dep:matrix-sdk-sled", "matrix-sdk-sled?/state-store"]
 indexeddb = ["dep:matrix-sdk-indexeddb"]
 
+reqwest = ["dep:reqwest"]
 qrcode = ["e2e-encryption", "matrix-sdk-base/qrcode"]
 markdown = ["ruma/markdown"]
-native-tls = ["reqwest/native-tls"]
-rustls-tls = ["reqwest/rustls-tls"]
-socks = ["reqwest/socks"]
+native-tls = [
+    "reqwest?/native-tls",
+    "isahc?/native-tls",
+]
+rustls-tls = [
+    "reqwest?/rustls-tls",
+    "isahc?/rustls-tls",
+]
+socks = ["reqwest?/socks"]
 sso-login = ["warp", "dep:rand", "dep:tokio-stream"]
 appservice = ["ruma/appservice-api-s"]
 image-proc = ["dep:image"]
@@ -70,13 +82,14 @@ futures-core = "0.3.21"
 futures-signals = { version = "0.3.30", default-features = false }
 futures-util = { version = "0.3.21", default-features = false }
 http = "0.2.6"
-matrix-sdk-base = { version = "0.6.0", path = "../matrix-sdk-base", default_features = false }
+matrix-sdk-base = { version = "0.6.0", path = "../matrix-sdk-base", default-features = false }
 matrix-sdk-common = { version = "0.6.0", path = "../matrix-sdk-common" }
 matrix-sdk-indexeddb = { version = "0.2.0", path = "../matrix-sdk-indexeddb", default-features = false, optional = true }
 matrix-sdk-sled = { version = "0.2.0", path = "../matrix-sdk-sled", default-features = false, optional = true }
 mime = "0.3.16"
 rand = { version = "0.8.5", optional = true }
-reqwest = { version = "0.11.10", default_features = false}
+reqwest = { version = "0.11.10", default-features = false, optional = true }
+isahc = { version = "1.7", git = "https://github.com/sagebind/isahc/",  default-features = false, features = ["http2", "static-curl", "text-decoding"], optional = true}
 serde = "1.0.136"
 serde_json = "1.0.79"
 thiserror = "1.0.30"
