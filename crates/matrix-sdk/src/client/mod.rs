@@ -35,7 +35,7 @@ use matrix_sdk_common::{
     locks::{Mutex, RwLock, RwLockReadGuard},
 };
 #[cfg(feature = "appservice")]
-use ruma::TransactionId;
+use ruma::api::appservice::event::push_events;
 use ruma::{
     api::{
         client::{
@@ -258,9 +258,71 @@ impl Client {
     #[cfg(feature = "appservice")]
     pub async fn receive_transaction(
         &self,
-        transaction_id: &TransactionId,
-        sync_response: sync_events::v3::Response,
+        transaction: &push_events::v1::IncomingRequest,
     ) -> Result<()> {
+        // FIXME: This is wrong, there were two clients involved when this was
+        // part of the appservice crate
+
+        use ruma::events::room::member::MembershipState;
+        use serde::Deserialize;
+        use tracing::warn;
+
+        use crate::appservice_user_membership_key;
+
+        /// Helper type for extracting the room id for an event
+        #[derive(Debug, Deserialize)]
+        struct EventRoomId {
+            room_id: Option<OwnedRoomId>,
+        }
+
+        let Some(user_id) = self.user_id() else {
+            // The client is not logged in, skipping
+            return Ok(());
+        };
+        let user_localpart = user_id.localpart();
+
+        let mut response = sync_events::v3::Response::new(transaction.txn_id.to_string());
+
+        // Clients expect events to be grouped per room, where the
+        // group also denotes what the client's membership of the given
+        // room is. We take all the events in the transaction and sort
+        // them into appropriate groups.
+        //
+        // We special-case the `sender_localpart` user which receives all events and
+        // by falling back to a membership of "join" if it's unknown.
+        for raw_event in &transaction.events {
+            let Some(room_id) = raw_event.deserialize_as::<EventRoomId>()?.room_id else {
+                warn!("Transaction contained event with no ID");
+                continue;
+            };
+            let key = appservice_user_membership_key(&room_id, user_localpart);
+            let membership = match self.store().get_custom_value(&key).await? {
+                Some(value) => String::from_utf8(value).ok().map(MembershipState::from),
+                // Assume the `sender_localpart` user is in every known room
+                None if user_localpart == sender_localpart => Some(MembershipState::Join),
+                None => None,
+            };
+
+            match membership {
+                Some(MembershipState::Join) => {
+                    let room = response.rooms.join.entry(room_id).or_default();
+                    room.timeline.events.push(raw_event.clone().cast())
+                }
+                Some(MembershipState::Leave | MembershipState::Ban) => {
+                    let room = response.rooms.leave.entry(room_id).or_default();
+                    room.timeline.events.push(raw_event.clone().cast())
+                }
+                Some(MembershipState::Knock) => {
+                    response.rooms.knock.entry(room_id).or_default();
+                }
+                Some(MembershipState::Invite) => {
+                    response.rooms.invite.entry(room_id).or_default();
+                }
+                Some(unknown) => debug!("Unknown membership type: {unknown}"),
+                None => debug!("Assuming {user_localpart} is not in {room_id}"),
+            }
+        }
+
         const TXN_ID_KEY: &[u8] = b"appservice.txn_id";
 
         let store = self.store();
@@ -282,7 +344,9 @@ impl Client {
         } else {
             self.store().set_custom_value(TXN_ID_KEY, txn_id_bytes).await?;
         }
-        self.process_sync(sync_response).await?;
+
+        let response = self.base_client().receive_sync_response(sync_response).await?;
+        self.handle_sync_response(&response).await?;
 
         Ok(())
     }

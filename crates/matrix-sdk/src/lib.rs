@@ -71,3 +71,16 @@ fn init_logging() {
         .with(tracing_subscriber::fmt::layer().with_test_writer())
         .init();
 }
+
+#[cfg(feature = "appservice")]
+use ruma::RoomId;
+
+/// Source of truth for appservice user membership custom store key.
+///
+/// Should be made into a proper part of the store ultimately.
+#[cfg(feature = "appservice")]
+#[doc(hidden)]
+pub fn appservice_user_membership_key(room_id: &RoomId, user_localpart: &str) -> Vec<u8> {
+    const USER_MEMBER: &[u8] = b"appservice.users.membership.";
+    [USER_MEMBER, room_id.as_bytes(), b".", user_localpart.as_bytes()].concat()
+}
