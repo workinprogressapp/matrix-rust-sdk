@@ -37,8 +37,11 @@ use tracing::instrument;
 
 use super::Left;
 use crate::{
-    attachment::AttachmentConfig, error::HttpResult, room::Common, BaseRoom, Client, Result,
-    RoomType,
+    attachment::AttachmentConfig,
+    error::HttpResult,
+    room::Common,
+    send_event_queue::{SendMessageLikeEventHandle, SendStateEventHandle},
+    BaseRoom, Client, Result, RoomType,
 };
 #[cfg(feature = "image-proc")]
 use crate::{
@@ -623,6 +626,12 @@ impl Joined {
         Ok(response)
     }
 
+    // Call to this fn should enqueue
+    // await'ing SendStateEventHandle should wait for the server response
+    fn queue_send_message_like_event_req(&self) -> SendMessageLikeEventHandle {
+        todo!()
+    }
+
     /// Send an attachment to this room.
     ///
     /// This will upload the given data that the reader produces using the
@@ -937,6 +946,12 @@ impl Joined {
         );
 
         Ok(self.client.send(request, None).await?)
+    }
+
+    // Call to this fn should enqueue
+    // await'ing SendStateEventHandle should wait for the server response
+    fn queue_send_state_event_req(&self) -> SendStateEventHandle {
+        todo!()
     }
 
     /// Strips all information out of an event of the room.

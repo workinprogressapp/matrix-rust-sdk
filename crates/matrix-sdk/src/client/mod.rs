@@ -82,6 +82,7 @@ use crate::{
     },
     http_client::HttpClient,
     room,
+    send_event_queue::SendEventQueue,
     sync::SyncResponse,
     Account, Error, Media, RefreshTokenError, Result, RumaApiError,
 };
@@ -174,6 +175,10 @@ pub(crate) struct ClientInner {
     /// wait for the sync to get the data to fetch a room object from the state
     /// store.
     pub(crate) sync_beat: event_listener::Event,
+    /// Per-room queues for sending events.
+    ///
+    /// Shared with event-sending tokio task.
+    pub(crate) send_event_queues: Arc<DashMap<OwnedRoomId, SendEventQueue>>,
 }
 
 #[cfg(not(tarpaulin_include))]

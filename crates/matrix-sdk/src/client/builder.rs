@@ -409,6 +409,7 @@ impl ClientBuilder {
             sync_beat: event_listener::Event::new(),
             handle_refresh_tokens: self.handle_refresh_tokens,
             refresh_token_lock: Mutex::new(Ok(())),
+            send_event_queues: Default::default(),
         });
 
         Ok(Client { inner })
