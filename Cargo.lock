@@ -1735,8 +1735,7 @@ dependencies = [
 [[package]]
 name = "getrandom"
 version = "0.1.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc3cb4d91f53b50155bdcfd23f6a4c39ae1969c2ae85982b135750cccaf5fce"
+source = "git+https://github.com/pixlwave/getrandom?branch=0.1#b80abc2bf89bdd5ef6e5938febda3ceeb6259165"
 dependencies = [
  "cfg-if",
  "js-sys",
@@ -1748,8 +1747,7 @@ dependencies = [
 [[package]]
 name = "getrandom"
 version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c05aeb6a22b8f62540c194aac980f2115af067bfe15a0734d7277a768d396b31"
+source = "git+https://github.com/rust-random/getrandom?rev=8e44d13ebf7e53f8d2b32c9b63caab8a993d30e4#8e44d13ebf7e53f8d2b32c9b63caab8a993d30e4"
 dependencies = [
  "cfg-if",
  "js-sys",
@@ -2139,10 +2137,8 @@ dependencies = [
 [[package]]
 name = "indexmap"
 version = "1.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1885e79c1fc4b10f0e172c475f458b7f7b93061064d98c3293e98c5ba0c8b399"
+source = "git+https://github.com/pixlwave/indexmap?branch=indexmap-1.x#f96513d04028b6a9bcf247aa3f4feff76ad9bfaf"
 dependencies = [
- "autocfg",
  "hashbrown",
  "serde",
 ]
