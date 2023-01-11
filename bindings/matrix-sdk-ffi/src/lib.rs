@@ -33,20 +33,15 @@ pub mod sliding_sync;
 pub mod timeline;
 mod uniffi_api;
 
+pub use async_compat::TOKIO1 as RUNTIME;
 use client::Client;
 use client_builder::ClientBuilder;
 use matrix_sdk::{encryption::CryptoStoreError, HttpError, IdParseError};
-use once_cell::sync::Lazy;
-use tokio::runtime::Runtime;
-pub use uniffi_api::*;
-
-pub static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Can't start Tokio runtime"));
-
 pub use matrix_sdk::{
     room::timeline::PaginationOutcome,
     ruma::{api::client::account::register, UserId},
 };
+pub use uniffi_api::*;
 
 pub use self::{
     authentication_service::*, client::*, notification_service::*, room::*,
