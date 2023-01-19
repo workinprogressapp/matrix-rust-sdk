@@ -296,8 +296,8 @@ impl OlmMachine {
     }
 
     /// Get all the tracked users we know about
-    pub fn tracked_users(&self) -> HashSet<OwnedUserId> {
-        self.store.tracked_users()
+    pub async fn tracked_users(&self) -> StoreResult<HashSet<OwnedUserId>> {
+        self.store.tracked_users().await
     }
 
     /// Get the outgoing requests that need to be sent out.
@@ -318,7 +318,7 @@ impl OlmMachine {
             requests.push(r);
         }
 
-        for request in self.identity_manager.users_for_key_query().await.into_iter().map(|r| {
+        for request in self.identity_manager.users_for_key_query().await?.into_iter().map(|r| {
             OutgoingRequest { request_id: TransactionId::new(), request: Arc::new(r.into()) }
         }) {
             requests.push(request);
@@ -1207,8 +1207,11 @@ impl OlmMachine {
     ///
     /// If the user is already known to the Olm machine it will not be
     /// considered for a key query.
-    pub async fn update_tracked_users(&self, users: impl IntoIterator<Item = &UserId>) {
-        self.identity_manager.update_tracked_users(users).await;
+    pub async fn update_tracked_users(
+        &self,
+        users: impl IntoIterator<Item = &UserId>,
+    ) -> StoreResult<()> {
+        self.identity_manager.update_tracked_users(users).await
     }
 
     async fn wait_if_user_pending(&self, user_id: &UserId, timeout: Option<Duration>) {
