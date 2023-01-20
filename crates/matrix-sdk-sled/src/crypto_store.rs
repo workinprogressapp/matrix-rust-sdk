@@ -160,28 +160,18 @@ pub struct AccountInfo {
     identity_keys: Arc<IdentityKeys>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct TrackedUser {
-    user_id: OwnedUserId,
-    dirty: bool,
-}
-
 /// A [sled] based cryptostore.
 ///
 /// [sled]: https://github.com/spacejam/sled#readme
 #[derive(Clone)]
 pub struct SledCryptoStore {
     account_info: Arc<RwLock<Option<AccountInfo>>>,
-    tracked_user_loading_lock: Arc<Mutex<()>>,
-    tracked_users_loaded: Arc<AtomicBool>,
 
     store_cipher: Option<Arc<StoreCipher>>,
     path: Option<PathBuf>,
     inner: Db,
 
     session_cache: SessionStore,
-    tracked_users_cache: Arc<DashSet<OwnedUserId>>,
-    users_for_key_query_cache: Arc<DashSet<OwnedUserId>>,
 
     account: Tree,
     private_identity: Tree,
@@ -404,8 +394,6 @@ impl SledCryptoStore {
 
         let database = Self {
             account_info: RwLock::new(None).into(),
-            tracked_user_loading_lock: Mutex::new(()).into(),
-            tracked_users_loaded: AtomicBool::new(false).into(),
             path,
             inner: db,
             store_cipher,
@@ -413,8 +401,6 @@ impl SledCryptoStore {
             private_identity,
             sessions,
             session_cache,
-            tracked_users_cache: DashSet::new().into(),
-            users_for_key_query_cache: DashSet::new().into(),
             inbound_group_sessions,
             outbound_group_sessions,
             outgoing_secret_requests,
@@ -429,33 +415,6 @@ impl SledCryptoStore {
         database.upgrade().await?;
 
         Ok(database)
-    }
-
-    async fn load_tracked_users(&self) -> Result<()> {
-        // If the users are loaded do nothing, otherwise acquire a lock.
-        if !self.tracked_users_loaded.load(Ordering::SeqCst) {
-            let _lock = self.tracked_user_loading_lock.lock().await;
-
-            // Check again if the users have been loaded, in case another call to this
-            // method loaded the tracked users between the time we tried to
-            // acquire the lock and the time we actually acquired the lock.
-            if !self.tracked_users_loaded.load(Ordering::SeqCst) {
-                for value in &self.tracked_users {
-                    let (_, user) = value.map_err(CryptoStoreError::backend)?;
-                    let user: TrackedUser = self.deserialize_value(&user)?;
-
-                    self.tracked_users_cache.insert(user.user_id.to_owned());
-
-                    if user.dirty {
-                        self.users_for_key_query_cache.insert(user.user_id);
-                    }
-                }
-
-                self.tracked_users_loaded.store(true, Ordering::SeqCst);
-            }
-        }
-
-        Ok(())
     }
 
     async fn load_outbound_group_session(
@@ -697,34 +656,6 @@ impl SledCryptoStore {
 
         Ok(request)
     }
-
-    /// Save a batch of tracked users.
-    ///
-    /// # Arguments
-    ///
-    /// * `tracked_users` - A list of tuples. The first element of the tuple is
-    /// the user ID, the second element is if the user should be considered to
-    /// be dirty.
-    pub async fn save_tracked_users(
-        &self,
-        tracked_users: &[(&UserId, bool)],
-    ) -> Result<(), CryptoStoreError> {
-        let users: Vec<TrackedUser> = tracked_users
-            .iter()
-            .map(|(u, d)| TrackedUser { user_id: (*u).into(), dirty: *d })
-            .collect();
-
-        let mut batch = Batch::default();
-
-        for user in users {
-            batch.insert(
-                self.encode_key(TRACKED_USERS_TABLE, user.user_id.as_str()),
-                self.serialize_value(&user)?,
-            );
-        }
-
-        self.tracked_users.apply_batch(batch).map_err(CryptoStoreError::backend)
-    }
 }
 
 #[async_trait]
@@ -882,44 +813,32 @@ impl CryptoStore for SledCryptoStore {
         self.load_outbound_group_session(room_id).await
     }
 
-    async fn is_user_tracked(&self, user_id: &UserId) -> Result<bool> {
-        self.load_tracked_users().await?;
-
-        Ok(self.tracked_users_cache.contains(user_id))
+    async fn load_tracked_users(&self) -> Result<Vec<TrackedUser>> {
+        self.tracked_users.iter().map(|value| {
+            let (_, user) = value.map_err(CryptoStoreError::backend)?;
+            self.deserialize_value(&user)
+        })
     }
 
-    async fn has_users_for_key_query(&self) -> Result<bool> {
-        self.load_tracked_users().await?;
+    async fn save_tracked_users(
+        &self,
+        tracked_users: &[(&UserId, bool)],
+    ) -> Result<(), CryptoStoreError> {
+        let users: Vec<TrackedUser> = tracked_users
+            .iter()
+            .map(|(u, d)| TrackedUser { user_id: (*u).into(), dirty: *d })
+            .collect();
 
-        Ok(!self.users_for_key_query_cache.is_empty())
-    }
+        let mut batch = Batch::default();
 
-    async fn users_for_key_query(&self) -> Result<HashSet<OwnedUserId>> {
-        self.load_tracked_users().await?;
-
-        Ok(self.users_for_key_query_cache.iter().map(|u| u.clone()).collect())
-    }
-
-    async fn tracked_users(&self) -> Result<HashSet<OwnedUserId>> {
-        self.load_tracked_users().await?;
-
-        Ok(self.tracked_users_cache.to_owned().iter().map(|u| u.clone()).collect())
-    }
-
-    async fn update_tracked_user(&self, user: &UserId, dirty: bool) -> Result<bool> {
-        self.load_tracked_users().await?;
-
-        let already_added = self.tracked_users_cache.insert(user.to_owned());
-
-        if dirty {
-            self.users_for_key_query_cache.insert(user.to_owned());
-        } else {
-            self.users_for_key_query_cache.remove(user);
+        for user in users {
+            batch.insert(
+                self.encode_key(TRACKED_USERS_TABLE, user.user_id.as_str()),
+                self.serialize_value(&user)?,
+            );
         }
 
-        self.save_tracked_users(&[(user, dirty)]).await?;
-
-        Ok(already_added)
+        self.tracked_users.apply_batch(batch).map_err(CryptoStoreError::backend)
     }
 
     async fn get_device(

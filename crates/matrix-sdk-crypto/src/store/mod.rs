@@ -51,10 +51,14 @@ use std::{
     fmt::Debug,
     io::Error as IoError,
     ops::Deref,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering::SeqCst},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
+use dashmap::DashSet;
 use matrix_sdk_common::{locks::Mutex, AsyncTraitDeps};
 pub use memorystore::MemoryStore;
 use ruma::{
@@ -99,6 +103,11 @@ pub struct Store {
     identity: Arc<Mutex<PrivateCrossSigningIdentity>>,
     inner: Arc<dyn CryptoStore>,
     verification_machine: VerificationMachine,
+
+    tracked_users_loaded: Arc<AtomicBool>,
+    tracked_users_loading_lock: Arc<Mutex<()>>,
+    tracked_users_cache: Arc<DashSet<OwnedUserId>>,
+    users_for_key_query_cache: Arc<DashSet<OwnedUserId>>,
 }
 
 #[derive(Default, Debug)]
@@ -268,7 +277,16 @@ impl Store {
         store: Arc<dyn CryptoStore>,
         verification_machine: VerificationMachine,
     ) -> Self {
-        Self { user_id, identity, inner: store, verification_machine }
+        Self {
+            user_id,
+            identity,
+            inner: store,
+            verification_machine,
+            tracked_users_loaded: AtomicBool::new(false).into(),
+            tracked_users_loading_lock: Arc::new(Mutex::new(())),
+            tracked_users_cache: Arc::new(DashSet::new()),
+            users_for_key_query_cache: Arc::new(DashSet::new()),
+        }
     }
 
     /// UserId associated with this store
@@ -587,6 +605,84 @@ impl Store {
 
         Ok(())
     }
+
+    async fn load_tracked_users(&self) -> Result<()> {
+        // If the users are loaded do nothing, otherwise acquire a lock.
+        if !self.tracked_users_loaded.load(SeqCst) {
+            let _lock = self.tracked_users_loading_lock.lock().await;
+
+            // Check again if the users have been loaded, in case another call to this
+            // method loaded the tracked users between the time we tried to
+            // acquire the lock and the time we actually acquired the lock.
+            if !self.tracked_users_loaded.load(SeqCst) {
+                for user in self.inner.load_tracked_users().await? {
+                    self.tracked_users_cache.insert(user.user_id.to_owned());
+
+                    if user.dirty {
+                        self.users_for_key_query_cache.insert(user.user_id);
+                    }
+                }
+
+                self.tracked_users_loaded.store(true, SeqCst);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Is the given user already tracked.
+    pub async fn is_user_tracked(&self, user_id: &UserId) -> Result<bool> {
+        self.load_tracked_users().await?;
+
+        Ok(self.tracked_users_cache.contains(user_id))
+    }
+
+    /// Are there any tracked users that are marked as dirty.
+    pub async fn has_users_for_key_query(&self) -> Result<bool> {
+        self.load_tracked_users().await?;
+
+        Ok(!self.users_for_key_query_cache.is_empty())
+    }
+
+    /// Set of users that we need to query keys for. This is a subset of
+    /// the tracked users.
+    pub async fn users_for_key_query(&self) -> Result<HashSet<OwnedUserId>> {
+        self.load_tracked_users().await?;
+
+        Ok(self.users_for_key_query_cache.iter().map(|u| u.clone()).collect())
+    }
+
+    /// Get all tracked users we know about.
+    pub async fn tracked_users(&self) -> Result<HashSet<OwnedUserId>> {
+        self.load_tracked_users().await?;
+
+        Ok(self.tracked_users_cache.to_owned().iter().map(|u| u.clone()).collect())
+    }
+
+    /// Add an user for tracking.
+    ///
+    /// Returns true if the user wasn't already tracked, false otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that should be marked as tracked.
+    ///
+    /// * `dirty` - Should the user be also marked for a key query.
+    pub async fn update_tracked_user(&self, user: &UserId, dirty: bool) -> Result<bool> {
+        self.load_tracked_users().await?;
+
+        let already_added = self.tracked_users_cache.insert(user.to_owned());
+
+        if dirty {
+            self.users_for_key_query_cache.insert(user.to_owned());
+        } else {
+            self.users_for_key_query_cache.remove(user);
+        }
+
+        self.inner.save_tracked_users(&[TrackedUser { user_id: user.to_owned(), dirty }]).await?;
+
+        Ok(already_added)
+    }
 }
 
 impl Deref for Store {
@@ -726,29 +822,17 @@ pub trait CryptoStore: AsyncTraitDeps {
         room_id: &RoomId,
     ) -> Result<Option<OutboundGroupSession>>;
 
-    /// Is the given user already tracked.
-    async fn is_user_tracked(&self, user_id: &UserId) -> Result<bool>;
+    async fn load_tracked_users(&self) -> Result<Vec<TrackedUser>>;
 
-    /// Are there any tracked users that are marked as dirty.
-    async fn has_users_for_key_query(&self) -> Result<bool>;
-
-    /// Set of users that we need to query keys for. This is a subset of
-    /// the tracked users.
-    async fn users_for_key_query(&self) -> Result<HashSet<OwnedUserId>>;
-
-    /// Get all tracked users we know about.
-    async fn tracked_users(&self) -> Result<HashSet<OwnedUserId>>;
-
-    /// Add an user for tracking.
-    ///
-    /// Returns true if the user wasn't already tracked, false otherwise.
+    /// Save a batch of tracked users.
     ///
     /// # Arguments
     ///
-    /// * `user` - The user that should be marked as tracked.
-    ///
-    /// * `dirty` - Should the user be also marked for a key query.
-    async fn update_tracked_user(&self, user: &UserId, dirty: bool) -> Result<bool>;
+    /// * `tracked_users` - A list of users that should be marked as tracked.
+    async fn save_tracked_users(
+        &self,
+        tracked_users: &[TrackedUser],
+    ) -> Result<(), CryptoStoreError>;
 
     /// Get the device for the given user with the given device ID.
     ///
@@ -817,6 +901,12 @@ pub trait CryptoStore: AsyncTraitDeps {
     /// * `request_id` - The unique request id that identifies this outgoing key
     /// request.
     async fn delete_outgoing_secret_requests(&self, request_id: &TransactionId) -> Result<()>;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TrackedUser {
+    pub user_id: OwnedUserId,
+    pub dirty: bool,
 }
 
 /// A type that can be type-erased into `Arc<dyn CryptoStore>`.
