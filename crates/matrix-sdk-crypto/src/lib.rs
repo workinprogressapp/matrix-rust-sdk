@@ -106,3 +106,122 @@ pub mod vodozemac {
         DecodeError, KeyError, PickleError, SignatureError,
     };
 }
+
+#[cfg_attr(doc, aquamarine::aquamarine)]
+/// A step by step guide that explains how to include end-to-end-encryption
+/// support in a client library.
+///
+/// # Overview
+/// 1. [Initialization and initial setup](#initializing-the-state-machine)
+/// 2. [Decrypting room events](decryption)
+/// 3. [Encrypting room events](encryption)
+/// 4. [Interactively verifying devices and user identities](verification)
+///
+/// # Initializing the state machine
+///
+/// ```
+/// use anyhow::Result;
+/// use matrix_sdk_crypto::OlmMachine;
+/// use ruma::user_id;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// let user_id = user_id!("@alice:localhost");
+/// let device_id = "DEVICEID".into();
+///
+/// let machine = OlmMachine::new(user_id, device_id).await;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// This will create a `OlmMachine` that does not persist any data TODO
+///
+/// ```ignore
+/// use anyhow::Result;
+/// use matrix_sdk_crypto::OlmMachine;
+/// use matrix_sdk_sled::SledCryptoStore;
+/// use ruma::user_id;
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// let user_id = user_id!("@alice:localhost");
+/// let device_id = "DEVICEID".into();
+///
+/// let store = SledCryptoStore::open("/home/example/matrix-client/").await?;
+///
+/// let machine = OlmMachine::with_store(user_id, device_id, store).await;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Decryption
+///
+/// To enable decryption the following three steps are needed:
+///
+/// 1. Upload your devices identity keys and a set of one-time keys.
+/// 2. Receive room keys that were encrypted for your specific device and
+///    decrypt them.
+/// 3. Decrypt room events.
+///
+/// 1. Send outgoing requests out, this uploads your devices identity keys and
+/// one-time keys.
+///
+/// 2. Receive sync changes, this pushes room keys into the state
+/// machine
+///
+/// 3. Decrypt room events.
+///
+///
+/// The simplified flowchart
+///
+/// ```mermaid
+/// graph TD;
+///     sync[Sync with the homeserver]
+///     receive_changes[Push E2EE related changes into the state machine]
+///     send_outgoing_requests[Send all outgoing requests to the homeserver]
+///     decrypt[Process the rest of the sync]
+///
+///     click receive_changes callback "OlmMachine::receive_sync_changes()"
+///
+///     sync --> receive_changes;
+///     receive_changes --> send_outgoing_requests;
+///     send_outgoing_requests --> decrypt;
+///     decrypt -- repeat --> sync;
+/// ```
+///
+/// ## Uploading identity and one-time keys.
+///
+/// ## Receivng room keys and related changes
+/// ```no_run
+/// # use std::collections::BTreeMap;
+/// # use anyhow::Result;
+/// # use matrix_sdk_crypto::OlmMachine;
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # let to_device_events = Vec::new();
+/// # let changed_devices = Default::default();
+/// # let one_time_key_counts = BTreeMap::default();
+/// # let unused_fallback_keys = Some(Vec::new());
+/// # let machine: OlmMachine = unimplemented!();
+/// // Push changes that the server sent to us in a sync response.
+/// let decrypted_to_device = machine
+///     .receive_sync_changes(
+///         to_device_events,
+///         &changed_devices,
+///         &one_time_key_counts,
+///         unused_fallback_keys.as_deref(),
+///     )
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Encryption
+///
+/// TODO
+///
+///
+/// # Verification
+///
+/// TODO
+pub mod tutorial {}
