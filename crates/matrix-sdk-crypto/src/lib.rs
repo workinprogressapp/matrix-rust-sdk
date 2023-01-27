@@ -111,11 +111,16 @@ pub mod vodozemac {
 /// A step by step guide that explains how to include end-to-end-encryption
 /// support in a client library.
 ///
-/// # Overview
-/// 1. [Initialization and initial setup](#initializing-the-state-machine)
-/// 2. [Decrypting room events](decryption)
-/// 3. [Encrypting room events](encryption)
-/// 4. [Interactively verifying devices and user identities](verification)
+/// # Table of contents
+/// 1. [Introduction](#introduction)
+/// 2. [Initialization and initial setup](#initializing-the-state-machine)
+/// 3. [Decrypting room events](decryption)
+/// 4. [Encrypting room events](encryption)
+/// 5. [Interactively verifying devices and user identities](verification)
+///
+/// # Introduction
+///
+/// TODO
 ///
 /// # Initializing the state machine
 ///
@@ -191,7 +196,7 @@ pub mod vodozemac {
 ///
 /// ## Uploading identity and one-time keys.
 ///
-/// ## Receivng room keys and related changes
+/// ## Receiving room keys and related changes
 /// ```no_run
 /// # use std::collections::BTreeMap;
 /// # use anyhow::Result;
