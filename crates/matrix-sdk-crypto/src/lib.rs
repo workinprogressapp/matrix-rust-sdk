@@ -1,4 +1,5 @@
 // Copyright 2020 The Matrix.org Foundation C.I.C.
+// Copyright 2023 Damir Jelić
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -108,21 +109,121 @@ pub mod vodozemac {
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
-/// A step by step guide that explains how to include end-to-end-encryption
-/// support in a client library.
+/// A step by step guide that explains how to include [end-to-end-encryption]
+/// support in a [Matrix] client library.
+///
+/// If you're not familiar with Matrix or how clients communicate with a Matrix
+/// homeserver it's advised to get yourself familiar with the [client-server spec](https://matrix.org/docs/spec/client_server/)
 ///
 /// # Table of contents
 /// 1. [Introduction](#introduction)
-/// 2. [Initialization and initial setup](#initializing-the-state-machine)
+/// 2. [Getting started](#getting-started)
 /// 3. [Decrypting room events](decryption)
 /// 4. [Encrypting room events](encryption)
 /// 5. [Interactively verifying devices and user identities](verification)
 ///
 /// # Introduction
 ///
-/// TODO
+/// This crate implements a [sans-network-io](https://sans-io.readthedocs.io/) state machine that
+/// allows you to add [end-to-end-encryption] support to a [Matrix] client
+/// library.
 ///
-/// # Initializing the state machine
+/// ## End-to-end-encryption
+///
+/// End-to-end encryption (E2EE) is a method of secure communication where only
+/// the communicating devices, also known as "the ends," can read the data being
+/// transmitted. This means that the data is encrypted on one device, and can
+/// only be decrypted on the other device. The server is used only as a
+/// transport mechanism to deliver messages between devices.
+///
+/// The following chart displays how communication between two clients using a
+/// server in the middle usually works.
+///
+/// ```mermaid
+/// flowchart LR
+///     alice[Alice]
+///     bob[Bob]
+///     subgraph Server
+///         direction LR
+///         outbox[Alice outbox]
+///         inbox[Bob inbox]
+///         outbox -. unencrypted .-> inbox
+///     end
+///
+///     alice -- encrypted --> outbox
+///     inbox -- encrypted --> bob
+/// ```
+///
+/// The next chart, instead, displays how the same flow is happening in a
+/// end-to-end-encrypted world.
+///
+/// ```mermaid
+/// flowchart LR
+///     alice[Alice]
+///     bob[Bob]
+///     subgraph Server
+///         direction LR
+///         outbox[Alice outbox]
+///         inbox[Bob inbox]
+///         outbox == encrypted ==> inbox
+///     end
+///
+///     alice == encrypted ==> outbox
+///     inbox == encrypted ==> bob
+/// ```
+///
+/// Note that the path from the outbox to the inbox is now encrypted as well.
+///
+/// ## Publishing cryptographic identities of devices
+///
+/// If Alice and Bob want to establish a secure channel over which they can
+/// exchange messages, they first need learn about each others cryptographic
+/// identities. This is achieved by using the homeserver as a public key
+/// directory.
+///
+/// A public key directory is used to store and distribute public keys of users
+/// in an end-to-end encrypted system. The basic idea behind a public key
+/// directory is that it allows users to easily discover and download the public
+/// keys of other users with whom they wish to establish an end-to-end encrypted
+/// communication.
+///
+/// Each user generates a pair of public and private keys. The user then uploads
+/// their public key to the public key directory. Other users can then search
+/// the directory to find the public key of the user they wish to communicate
+/// with, and download it to their own device.
+///
+/// Once a user has the other user's public key, they can use it to establish an
+/// end-to-end encrypted channel using a [key-agreement] protocol.
+///
+/// ```mermaid
+/// flowchart LR
+///     alice[Alice]
+///     subgraph server[Server]
+///         direction LR
+///         directory[(Public key directory)]
+///     end
+///     bob[Bob]
+///
+///     alice -- upload keys --> directory
+///     directory -- download keys --> bob
+/// ```
+///
+/// # Getting started
+///
+/// In the [Matrix] world the server is called a [homeserver]
+///
+/// ## Push/pull mechanism
+///
+/// ```mermaid
+/// flowchart LR
+///     homeserver[Homeserver]
+///     client[OlmMachine]
+///
+///     homeserver -- pull --> client
+///     client -- push --> homeserver
+/// ```
+///
+/// ## Initializing the state machine
 ///
 /// ```
 /// use anyhow::Result;
@@ -139,8 +240,7 @@ pub mod vodozemac {
 /// # }
 /// ```
 ///
-/// This will create a `OlmMachine` that does not persist any data TODO
-///
+/// This will create a [`OlmMachine`] that does not persist any data TODO
 /// ```ignore
 /// use anyhow::Result;
 /// use matrix_sdk_crypto::OlmMachine;
@@ -163,30 +263,19 @@ pub mod vodozemac {
 ///
 /// To enable decryption the following three steps are needed:
 ///
-/// 1. Upload your devices identity keys and a set of one-time keys.
-/// 2. Receive room keys that were encrypted for your specific device and
-///    decrypt them.
-/// 3. Decrypt room events.
-///
-/// 1. Send outgoing requests out, this uploads your devices identity keys and
-/// one-time keys.
-///
-/// 2. Receive sync changes, this pushes room keys into the state
-/// machine
-///
-/// 3. Decrypt room events.
-///
+/// 1. [The cryptographic identity of your device needs to be published to the
+/// homeserver](#uploading-identity-and-one-time-key)
+/// 2. [Decryption keys coming in from other devices need to be processed and
+/// stored](#receiving-room-keys-and-related-changes)
+/// 3. [Messages need to be decrypted](#decrypting-room-events)
 ///
 /// The simplified flowchart
-///
 /// ```mermaid
-/// graph TD;
+/// graph TD
 ///     sync[Sync with the homeserver]
 ///     receive_changes[Push E2EE related changes into the state machine]
 ///     send_outgoing_requests[Send all outgoing requests to the homeserver]
 ///     decrypt[Process the rest of the sync]
-///
-///     click receive_changes callback "OlmMachine::receive_sync_changes()"
 ///
 ///     sync --> receive_changes;
 ///     receive_changes --> send_outgoing_requests;
@@ -196,7 +285,36 @@ pub mod vodozemac {
 ///
 /// ## Uploading identity and one-time keys.
 ///
+/// TODO
+/// ```no_run
+/// # use std::collections::BTreeMap;
+/// # use ruma::api::client::keys::upload_keys::v3::Response;
+/// # use anyhow::Result;
+/// # use matrix_sdk_crypto::{OlmMachine, OutgoingRequest};
+/// # async fn send_request(request: OutgoingRequest) -> Result<Response> {
+/// #     let response = unimplemented!();
+/// #     Ok(response)
+/// # }
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # let machine: OlmMachine = unimplemented!();
+/// // Get all the outgoing requests.
+/// let outgoing_requests = machine.outgoing_requests().await?;
+///
+/// // Send each request to the server and push the response into the state machine.
+/// for request in outgoing_requests {
+///     let request_id = request.request_id();
+///     let response = send_request(request).await?;
+///     machine.mark_request_as_sent(&request_id, &response).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
 /// ## Receiving room keys and related changes
+///
+/// TODO
+///
 /// ```no_run
 /// # use std::collections::BTreeMap;
 /// # use anyhow::Result;
@@ -221,7 +339,132 @@ pub mod vodozemac {
 /// # }
 /// ```
 ///
+/// ## Decrypting room events
+///
+/// ```no_run
+/// # use std::collections::BTreeMap;
+/// # use anyhow::Result;
+/// # use matrix_sdk_crypto::OlmMachine;
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # let encrypted = unimplemented!();
+/// # let room_id = unimplemented!();
+/// # let machine: OlmMachine = unimplemented!();
+/// // Decrypt your room events now.
+/// let decrypted = machine.decrypt_room_event(encrypted, room_id).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
 /// # Encryption
+///
+/// TODO
+///
+/// ```mermaid
+/// sequenceDiagram
+/// actor Alice
+/// participant Homeserver
+/// actor Bob
+///
+/// Alice->>Homeserver: Download Bob's one-time
+/// Homeserver->>Alice: Bob's one-time keys
+/// Alice->>Alice: Encrypt the room key
+/// Alice->>Homeserver: Send the room key to each of Bob's devices
+/// Homeserver->>Bob: Deliver the room key
+/// Alice->>Alice: Encrypt the message
+/// Alice->>Homeserver: Send the encrypted message
+/// Homeserver->>Bob: Deliver the encrypted message
+/// ```
+///
+/// TODO
+///
+/// ## Tracking users
+///
+/// ```no_run
+/// # use std::collections::{BTreeMap, HashSet};
+/// # use anyhow::Result;
+/// # use ruma::UserId;
+/// # use matrix_sdk_crypto::OlmMachine;
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # let users: HashSet<&UserId> = HashSet::new();
+/// # let machine: OlmMachine = unimplemented!();
+/// // Mark all the users that are part of an encrypted room as tracked
+/// machine.update_tracked_users(users).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// TODO
+///
+/// ## Establishing end-to-end encrypted channels
+///
+/// TODO
+///
+/// ```no_run
+/// # use std::collections::{BTreeMap, HashSet};
+/// # use std::ops::Deref;
+/// # use anyhow::Result;
+/// # use ruma::UserId;
+/// # use ruma::api::client::keys::claim_keys::v3::{Response, Request};
+/// # use matrix_sdk_crypto::OlmMachine;
+/// # async fn send_request(request: &Request) -> Result<Response> {
+/// #     let response = unimplemented!();
+/// #     Ok(response)
+/// # }
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # let users: HashSet<&UserId> = HashSet::new();
+/// # let machine: OlmMachine = unimplemented!();
+/// // Mark all the users that are part of an encrypted room as tracked
+/// if let Some((request_id, request)) =
+///     machine.get_missing_sessions(users.iter().map(Deref::deref)).await?
+/// {
+///     let response = send_request(&request).await?;
+///     machine.mark_request_as_sent(&request_id, &response).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Exchanging room keys
+///
+/// TODO
+///
+/// ```no_run
+/// # use std::collections::{BTreeMap, HashSet};
+/// # use std::ops::Deref;
+/// # use anyhow::Result;
+/// # use ruma::UserId;
+/// # use ruma::api::client::keys::claim_keys::v3::{Response, Request};
+/// # use matrix_sdk_crypto::{OlmMachine, requests::ToDeviceRequest, EncryptionSettings};
+/// # async fn send_request(request: &ToDeviceRequest) -> Result<Response> {
+/// #     let response = unimplemented!();
+/// #     Ok(response)
+/// # }
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # let users: HashSet<&UserId> = HashSet::new();
+/// # let room_id = unimplemented!();
+/// # let settings = EncryptionSettings::default();
+/// # let machine: OlmMachine = unimplemented!();
+/// // Mark all the users that are part of an encrypted room as tracked
+/// let requests = machine.share_room_key(
+///     room_id,
+///     users.iter().map(Deref::deref),
+///     settings
+/// ).await?;
+///
+/// for request in requests {
+///     let request_id = &request.txn_id;
+///     let response = send_request(&request).await?;
+///     machine.mark_request_as_sent(&request_id, &response).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Encrypting room events
 ///
 /// TODO
 ///
@@ -229,4 +472,12 @@ pub mod vodozemac {
 /// # Verification
 ///
 /// TODO
+///
+/// [Matrix]: https://matrix.org/
+/// [end-to-end-encryption]: https://en.wikipedia.org/wiki/End-to-end_encryption
+/// [homeserver]: https://spec.matrix.org/unstable/#architecture
+/// [key-agreement]: https://en.wikipedia.org/wiki/Key-agreement_protocol
+///
+/// [X3DH]: https://signal.org/docs/specifications/x3dh/
+/// [diffie-hellman]: https://en.wikipedia.org/wiki/Diffie%E2%80%93Hellman_key_exchange
 pub mod tutorial {}
