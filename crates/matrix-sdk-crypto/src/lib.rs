@@ -113,7 +113,7 @@ pub mod vodozemac {
 /// support in a [Matrix] client library.
 ///
 /// If you're not familiar with Matrix or how clients communicate with a Matrix
-/// homeserver it's advised to get yourself familiar with the [client-server spec](https://matrix.org/docs/spec/client_server/)
+/// homeserver it's advised to get yourself familiar with the [client-server spec](https://matrix.org/docs/spec/client_server/).
 ///
 /// # Table of contents
 /// 1. [Introduction](#introduction)
