@@ -970,11 +970,13 @@ impl ReadOnlyOwnUserIdentity {
 pub(crate) mod testing {
     //! Testing Facilities
     #![allow(dead_code)]
+    #[cfg(test)]
+    use ruma::UserId;
     use ruma::{api::client::keys::get_keys::v3::Response as KeyQueryResponse, user_id};
 
     use super::{ReadOnlyOwnUserIdentity, ReadOnlyUserIdentity};
     #[cfg(test)]
-    use crate::{identities::manager::testing::other_user_id, olm::PrivateCrossSigningIdentity};
+    use crate::{identities::manager::testing::{other_user_id, user_id as own_user_id}, olm::PrivateCrossSigningIdentity};
     use crate::{
         identities::{
             manager::testing::{other_key_query, own_key_query},
@@ -1017,10 +1019,22 @@ pub(crate) mod testing {
         own_identity(&own_key_query())
     }
 
+    /// Generate a private identity for tests
+    #[cfg(test)]
+    pub async fn get_private_identity(user_id: &UserId) -> PrivateCrossSigningIdentity {
+        PrivateCrossSigningIdentity::new(user_id.into()).await
+    }
+
+    /// Generate own private identity for tests
+    #[cfg(test)]
+    pub async fn get_own_private_identity() -> PrivateCrossSigningIdentity {
+        get_private_identity(own_user_id().into()).await
+    }
+
     /// Generate default other "own" identity for tests
     #[cfg(test)]
     pub async fn get_other_own_identity() -> ReadOnlyOwnUserIdentity {
-        let private_identity = PrivateCrossSigningIdentity::new(other_user_id().into()).await;
+        let private_identity = get_private_identity(other_user_id()).await;
         ReadOnlyOwnUserIdentity::from_private(&private_identity).await
     }
 
