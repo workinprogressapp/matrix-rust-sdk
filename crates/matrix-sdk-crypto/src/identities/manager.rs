@@ -668,7 +668,6 @@ pub(crate) mod testing {
         machine::testing::response_from_file,
         olm::{PrivateCrossSigningIdentity, ReadOnlyAccount},
         store::{CryptoStore, MemoryStore, Store},
-        types::DeviceKeys,
         verification::VerificationMachine,
     };
 
@@ -861,9 +860,11 @@ pub(crate) mod testing {
     }
 
     pub async fn key_query(
-        identity: PrivateCrossSigningIdentity,
-        device_keys: DeviceKeys,
+        identity: &PrivateCrossSigningIdentity,
+        account: &ReadOnlyAccount,
     ) -> KeyQueryResponse {
+        let device_keys = account.device_keys().await;
+
         let json = json!({
             "device_keys": {
                 "@example:localhost": {
@@ -996,11 +997,13 @@ pub(crate) mod tests {
         let private_identity = manager.store.private_identity();
         let private_identity = private_identity.lock().await.clone();
 
-        let device_keys = manager.store.account().device_keys().await;
+        let account = manager.store.account();
         manager
-            .receive_keys_query_response(&key_query(private_identity, device_keys).await)
+            .receive_keys_query_response(&key_query(&private_identity, account).await)
             .await
             .unwrap();
+
+        drop(private_identity);
 
         let identity = manager.store.get_user_identity(our_user).await.unwrap().unwrap();
         let identity = identity.own().unwrap();
