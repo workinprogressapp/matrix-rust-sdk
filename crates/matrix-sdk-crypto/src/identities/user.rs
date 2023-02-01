@@ -976,7 +976,10 @@ pub(crate) mod testing {
 
     use super::{ReadOnlyOwnUserIdentity, ReadOnlyUserIdentity};
     #[cfg(test)]
-    use crate::{identities::manager::testing::{other_user_id, user_id as own_user_id}, olm::PrivateCrossSigningIdentity};
+    use crate::{
+        identities::manager::testing::{other_user_id, own_user_id},
+        olm::PrivateCrossSigningIdentity,
+    };
     use crate::{
         identities::{
             manager::testing::{other_key_query, own_key_query},
@@ -1014,11 +1017,6 @@ pub(crate) mod testing {
         .unwrap()
     }
 
-    /// Generate default own identity for tests
-    pub fn get_own_identity() -> ReadOnlyOwnUserIdentity {
-        own_identity(&own_key_query())
-    }
-
     /// Generate a private identity for tests
     #[cfg(test)]
     pub async fn get_private_identity(user_id: &UserId) -> PrivateCrossSigningIdentity {
@@ -1031,14 +1029,20 @@ pub(crate) mod testing {
         get_private_identity(own_user_id().into()).await
     }
 
-    /// Generate default other "own" identity for tests
+    /// Generate default own public identity for tests
+    pub fn get_own_identity() -> ReadOnlyOwnUserIdentity {
+        own_identity(&own_key_query())
+    }
+
+    /// Generate alternative (i.e. with a different user ID) own public identity
+    /// for tests
     #[cfg(test)]
-    pub async fn get_other_own_identity() -> ReadOnlyOwnUserIdentity {
+    pub async fn get_alternative_own_identity() -> ReadOnlyOwnUserIdentity {
         let private_identity = get_private_identity(other_user_id()).await;
         ReadOnlyOwnUserIdentity::from_private(&private_identity).await
     }
 
-    /// Generate default other identify for tests
+    /// Generate default other public identity for tests
     pub fn get_other_identity() -> ReadOnlyUserIdentity {
         let user_id = user_id!("@example2:localhost");
         let response = other_key_query();
@@ -1071,7 +1075,7 @@ pub(crate) mod tests {
     use crate::{
         identities::{
             manager::testing::{own_key_query, own_key_query_with_user_id},
-            user::testing::get_other_own_identity,
+            user::testing::get_alternative_own_identity,
             Device, MasterPubkey, SelfSigningPubkey, UserSigningPubkey,
         },
         olm::{PrivateCrossSigningIdentity, ReadOnlyAccount},
@@ -1247,7 +1251,7 @@ pub(crate) mod tests {
                 let key: $key_type = raw.deserialize_as().unwrap();
 
                 // A different key is naturally not the same as our key.
-                let other_identity = get_other_own_identity().await;
+                let other_identity = get_alternative_own_identity().await;
                 let other_key = other_identity.$key_field;
                 assert_ne!(key, other_key);
 

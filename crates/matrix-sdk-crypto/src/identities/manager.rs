@@ -671,7 +671,7 @@ pub(crate) mod testing {
         verification::VerificationMachine,
     };
 
-    pub fn user_id() -> &'static UserId {
+    pub fn own_user_id() -> &'static UserId {
         user_id!("@example:localhost")
     }
 
@@ -684,9 +684,9 @@ pub(crate) mod testing {
     }
 
     pub(crate) async fn manager() -> IdentityManager {
-        let identity = PrivateCrossSigningIdentity::new(user_id().into()).await;
+        let identity = PrivateCrossSigningIdentity::new(own_user_id().into()).await;
         let identity = Arc::new(Mutex::new(identity));
-        let user_id = Arc::from(user_id());
+        let user_id = Arc::from(own_user_id());
         let account = ReadOnlyAccount::new(&user_id, device_id());
         let store: Arc<dyn CryptoStore> = Arc::new(MemoryStore::new());
         let verification = VerificationMachine::new(account, identity.clone(), store);
@@ -856,7 +856,7 @@ pub(crate) mod testing {
     }
 
     pub fn own_key_query() -> KeyQueryResponse {
-        own_key_query_with_user_id(user_id())
+        own_key_query_with_user_id(own_user_id())
     }
 
     pub async fn key_query(
@@ -900,7 +900,7 @@ pub(crate) mod tests {
     };
     use serde_json::json;
 
-    use super::testing::{device_id, key_query, manager, other_key_query, other_user_id, user_id};
+    use super::testing::{device_id, key_query, manager, other_key_query, other_user_id, own_user_id};
 
     fn key_query_without_failures() -> KeysQueryResponse {
         let response = json!({
@@ -990,7 +990,7 @@ pub(crate) mod tests {
     #[async_test]
     async fn test_manager_own_key_query_response() {
         let manager = manager().await;
-        let our_user = user_id();
+        let our_user = own_user_id();
         let devices = manager.store.get_user_devices(our_user).await.unwrap();
         assert_eq!(devices.devices().count(), 0);
 
