@@ -900,7 +900,9 @@ pub(crate) mod tests {
     };
     use serde_json::json;
 
-    use super::testing::{device_id, key_query, manager, other_key_query, other_user_id, own_user_id};
+    use super::testing::{
+        device_id, key_query, manager, other_key_query, other_user_id, own_user_id,
+    };
 
     fn key_query_without_failures() -> KeysQueryResponse {
         let response = json!({

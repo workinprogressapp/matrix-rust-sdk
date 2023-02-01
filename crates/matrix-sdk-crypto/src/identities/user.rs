@@ -970,19 +970,16 @@ impl ReadOnlyOwnUserIdentity {
 pub(crate) mod testing {
     //! Testing Facilities
     #![allow(dead_code)]
+    use ruma::api::client::keys::get_keys::v3::Response as KeyQueryResponse;
     #[cfg(test)]
     use ruma::UserId;
-    use ruma::{api::client::keys::get_keys::v3::Response as KeyQueryResponse, user_id};
 
     use super::{ReadOnlyOwnUserIdentity, ReadOnlyUserIdentity};
     #[cfg(test)]
-    use crate::{
-        identities::manager::testing::{other_user_id, own_user_id},
-        olm::PrivateCrossSigningIdentity,
-    };
+    use crate::olm::PrivateCrossSigningIdentity;
     use crate::{
         identities::{
-            manager::testing::{other_key_query, own_key_query},
+            manager::testing::{other_key_query, other_user_id, own_key_query, own_user_id},
             ReadOnlyDevice,
         },
         types::CrossSigningKey,
@@ -1000,7 +997,7 @@ pub(crate) mod testing {
 
     /// Generate ReadOnlyOwnUserIdentity from KeyQueryResponse for testing
     pub fn own_identity(response: &KeyQueryResponse) -> ReadOnlyOwnUserIdentity {
-        let user_id = user_id!("@example:localhost");
+        let user_id = own_user_id();
 
         let master_key: CrossSigningKey =
             response.master_keys.get(user_id).unwrap().deserialize_as().unwrap();
@@ -1044,7 +1041,7 @@ pub(crate) mod testing {
 
     /// Generate default other public identity for tests
     pub fn get_other_identity() -> ReadOnlyUserIdentity {
-        let user_id = user_id!("@example2:localhost");
+        let user_id = other_user_id();
         let response = other_key_query();
 
         let master_key: CrossSigningKey =
@@ -1064,7 +1061,7 @@ pub(crate) mod tests {
     use assert_matches::assert_matches;
     use matrix_sdk_common::locks::Mutex;
     use matrix_sdk_test::async_test;
-    use ruma::{encryption::KeyUsage, user_id, DeviceKeyId};
+    use ruma::{encryption::KeyUsage, DeviceKeyId};
     use serde_json::{json, Value};
     use vodozemac::Ed25519Signature;
 
@@ -1074,7 +1071,9 @@ pub(crate) mod tests {
     };
     use crate::{
         identities::{
-            manager::testing::{own_key_query, own_key_query_with_user_id},
+            manager::testing::{
+                other_user_id, own_key_query, own_key_query_with_user_id, own_user_id,
+            },
             user::testing::get_alternative_own_identity,
             Device, MasterPubkey, SelfSigningPubkey, UserSigningPubkey,
         },
@@ -1086,7 +1085,7 @@ pub(crate) mod tests {
 
     #[test]
     fn own_identity_create() {
-        let user_id = user_id!("@example:localhost");
+        let user_id = own_user_id();
         let response = own_key_query();
 
         let master_key: CrossSigningKey =
@@ -1190,7 +1189,7 @@ pub(crate) mod tests {
     /// and USK.
     #[test]
     fn cannot_instantiate_keys_with_incorrect_usage() {
-        let user_id = user_id!("@example:localhost");
+        let user_id = own_user_id();
         let response = own_key_query();
 
         let master_key = response.master_keys.get(user_id).unwrap();
@@ -1245,7 +1244,7 @@ pub(crate) mod tests {
     async fn partial_eq_cross_signing_keys() {
         macro_rules! test_partial_eq {
             ($key_type:ident, $key_field:ident, $field:ident, $usage:expr) => {
-                let user_id = user_id!("@example:localhost");
+                let user_id = own_user_id();
                 let response = own_key_query();
                 let raw = response.$field.get(user_id).unwrap();
                 let key: $key_type = raw.deserialize_as().unwrap();
@@ -1256,7 +1255,7 @@ pub(crate) mod tests {
                 assert_ne!(key, other_key);
 
                 // However, not even our own key material with another user ID is the same.
-                let other_user_id = user_id!("@example2:localhost");
+                let other_user_id = other_user_id();
                 let other_response = own_key_query_with_user_id(&other_user_id);
                 let other_raw = other_response.$field.get(other_user_id).unwrap();
                 let other_key: $key_type = other_raw.deserialize_as().unwrap();
