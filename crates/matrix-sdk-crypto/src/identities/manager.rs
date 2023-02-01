@@ -670,7 +670,6 @@ pub(crate) mod testing {
         store::{CryptoStore, MemoryStore, Store},
         types::DeviceKeys,
         verification::VerificationMachine,
-        UploadSigningKeysRequest,
     };
 
     pub fn user_id() -> &'static UserId {
@@ -861,8 +860,8 @@ pub(crate) mod testing {
         own_key_query_with_user_id(user_id())
     }
 
-    pub fn key_query(
-        identity: UploadSigningKeysRequest,
+    pub async fn key_query(
+        identity: PrivateCrossSigningIdentity,
         device_keys: DeviceKeys,
     ) -> KeyQueryResponse {
         let json = json!({
@@ -873,13 +872,13 @@ pub(crate) mod testing {
             },
             "failures": {},
             "master_keys": {
-                "@example:localhost": identity.master_key
+                "@example:localhost": (*(*identity.master_key).lock().await).as_ref().unwrap().public_key
             },
             "self_signing_keys": {
-                "@example:localhost": identity.self_signing_key
+                "@example:localhost": (*(*identity.self_signing_key).lock().await).as_ref().unwrap().public_key
             },
             "user_signing_keys": {
-                "@example:localhost": identity.user_signing_key
+                "@example:localhost": (*(*identity.user_signing_key).lock().await).as_ref().unwrap().public_key
             },
           }
         );
@@ -995,13 +994,11 @@ pub(crate) mod tests {
         assert_eq!(devices.devices().count(), 0);
 
         let private_identity = manager.store.private_identity();
-        let private_identity = private_identity.lock().await;
-        let identity_request = private_identity.as_upload_request().await;
-        drop(private_identity);
+        let private_identity = private_identity.lock().await.clone();
 
         let device_keys = manager.store.account().device_keys().await;
         manager
-            .receive_keys_query_response(&key_query(identity_request, device_keys))
+            .receive_keys_query_response(&key_query(private_identity, device_keys).await)
             .await
             .unwrap();
 
