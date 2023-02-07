@@ -363,14 +363,18 @@ pub mod vodozemac {
 ///
 /// ## Uploading identity and one-time keys.
 ///
-/// The first step is to announce the support for it to other users in the
-/// Matrix network. This involves publishing your long-term device keys and a
-/// set of one-time prekeys to the homeserver. This information is used by other
-/// devices to encrypt messages specifically for your device.
+/// To enable end-to-end encryption in a Matrix client, the first step is to
+/// announce the support for it to other users in the network. This is done by
+/// publishing the client's long-term device keys and a set of one-time prekeys
+/// to the Matrix homeserver. The homeserver then makes this information
+/// available to other devices in the network.
+///
+/// The long-term device keys and one-time prekeys allow other devices to
+/// encrypt messages specifically for your device.
 ///
 /// To achieve this, you will need to extract any requests that need to be sent
 /// to the homeserver from the [`OlmMachine`] and send them to the homeserver.
-/// The following snipped showcases how to achieve this using the
+/// The following snippet showcases how to achieve this using the
 /// [`OlmMachine::outgoing_requests()`] method:
 ///
 /// ```no_run
@@ -389,11 +393,106 @@ pub mod vodozemac {
 /// let outgoing_requests = machine.outgoing_requests().await?;
 ///
 /// // Send each request to the server and push the response into the state machine.
+/// // You can safely send these requests out in parallel.
 /// for request in outgoing_requests {
-///     // You can safely send out these requests out in parallel.
 ///     let request_id = request.request_id();
+///     // Send the request to the server and await a response.
 ///     let response = send_request(request).await?;
+///     // Push the response into the state machine.
 ///     machine.mark_request_as_sent(&request_id, &response).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// It's important to note that the outgoing requests method in the
+/// [`OlmMachine`], while thread-safe, may return the same request multiple
+/// times if it is called multiple times before the request has been marked as
+/// sent. To prevent this issue, it is advisable to encapsulate the outgoing
+/// request handling logic into a separate helper method and protect it from
+/// being called multiple times concurrently using a lock.
+///
+/// This helps to ensure that the request is only handled once and prevents
+/// multiple identical requests from being sent.
+///
+/// Additionally, if an error occurs while sending a request using the
+/// [`OlmMachine::outgoing_requests()`] method, the request will be
+/// naturally retried the next time the method is called.
+///
+/// A more complete example, which uses a helper method, might look like this:
+/// ```no_run
+/// # use std::collections::BTreeMap;
+/// # use ruma::api::client::keys::upload_keys::v3::Response;
+/// # use anyhow::Result;
+/// # use matrix_sdk_crypto::{OlmMachine, OutgoingRequest};
+/// # async fn send_request(request: &OutgoingRequest) -> Result<Response> {
+/// #     let response = unimplemented!();
+/// #     Ok(response)
+/// # }
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// struct Client {
+///     outgoing_requests_lock: tokio::sync::Mutex<()>,
+///     olm_machine: OlmMachine,
+/// }
+///
+/// async fn process_outgoing_requests(client: &Client) -> Result<()> {
+///     // Let's acquire a lock so we know that we don't send out the same request out multiple
+///     // times.
+///     let guard = client.outgoing_requests_lock.lock().await;
+///
+///     for request in client.olm_machine.outgoing_requests().await? {
+///         let request_id = request.request_id();
+///
+///         match send_request(&request).await {
+///             Ok(response) => {
+///                 client.olm_machine.mark_request_as_sent(&request_id, &response).await?;
+///             }
+///             Err(error) => {
+///                 // It's OK to ignore transient HTTP errors since requests will be retried.
+///                 eprintln!(
+///                     "Error while sending out a end-to-end encryption \
+///                     related request: {error:?}"
+///                 );
+///             }
+///         }
+///     }
+///
+///     Ok(())
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Once we have the helper method that processes our outgoing requests we can
+/// structure our sync method as follows:
+///
+/// ```no_run
+/// # use anyhow::Result;
+/// # use matrix_sdk_crypto::OlmMachine;
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # struct Client {
+/// #     outgoing_requests_lock: tokio::sync::Mutex<()>,
+/// #     olm_machine: OlmMachine,
+/// # }
+/// # async fn process_outgoing_requests(client: &Client) -> Result<()> {
+/// #    unimplemented!();
+/// # }
+/// # async fn send_out_sync_request(client: &Client) -> Result<()> {
+/// #    unimplemented!();
+/// # }
+/// async fn sync(client: &Client) -> Result<()> {
+///     // This is happening at the top of the method so we advertise our
+///     // end-to-end encryption capabilities as soon as possible.
+///     process_outgoing_requests(client).await?;
+///
+///     // We can sync with the homeserver now.
+///     let response = send_out_sync_request(client).await?;
+///
+///     // Process the sync response here.
+///
+///     Ok(())
 /// }
 /// # Ok(())
 /// # }
@@ -401,29 +500,78 @@ pub mod vodozemac {
 ///
 /// ## Receiving room keys and related changes
 ///
+/// The next step in our implementation is to forward messages that were sent
+/// directly to the client's device, and state updates about the one-time
+/// prekeys, to the [`OlmMachine`]. This is achieved using
+/// the [`OlmMachine::receive_sync_changes()`] method.
+///
+/// The method performs two tasks:
+///
+/// 1. It processes and, if necessary, decrypts each [to-device] event that was
+/// pushed into it, and returns the decrypted events. The original events are
+/// replaced with their decrypted versions.
+///
+/// 2. It produces internal state changes that may trigger the creation of new
+/// outgoing requests. For example, if the server informs the client that its
+/// one-time prekeys have been depleted, the OlmMachine will create an outgoing
+/// request to replenish them.
+///
+/// Our updated sync method now looks like this:
+///
 /// ```no_run
-/// # use std::collections::BTreeMap;
 /// # use anyhow::Result;
 /// # use matrix_sdk_crypto::OlmMachine;
+/// # use ruma::api::client::sync::sync_events::v3::Response;
 /// # #[tokio::main]
 /// # async fn main() -> Result<()> {
-/// # let to_device_events = Vec::new();
-/// # let changed_devices = Default::default();
-/// # let one_time_key_counts = BTreeMap::default();
-/// # let unused_fallback_keys = Some(Vec::new());
-/// # let machine: OlmMachine = unimplemented!();
-/// // Push changes that the server sent to us in a sync response.
-/// let decrypted_to_device = machine
-///     .receive_sync_changes(
-///         to_device_events,
-///         &changed_devices,
-///         &one_time_key_counts,
-///         unused_fallback_keys.as_deref(),
-///     )
-///     .await?;
+/// # struct Client {
+/// #     outgoing_requests_lock: tokio::sync::Mutex<()>,
+/// #     olm_machine: OlmMachine,
+/// # }
+/// # async fn process_outgoing_requests(client: &Client) -> Result<()> {
+/// #    unimplemented!();
+/// # }
+/// # async fn send_out_sync_request(client: &Client) -> Result<Response> {
+/// #    unimplemented!();
+/// # }
+/// async fn sync(client: &Client) -> Result<()> {
+///     process_outgoing_requests(client).await?;
+///
+///     let response = send_out_sync_request(client).await?;
+///
+///     // Push the sync changes into the OlmMachine, make sure that this is
+///     // happening before the `next_batch` token of the sync is persisted.
+///     let to_device_events = client
+///         .olm_machine
+///         .receive_sync_changes(
+///             response.to_device.events,
+///             &response.device_lists,
+///             &response.device_one_time_keys_count,
+///             response.device_unused_fallback_key_types.as_deref(),
+///         )
+///         .await?;
+///
+///     // Send out the outgoing requests that receiving sync changes produced.
+///     process_outgoing_requests(client).await?;
+///
+///     // Process the rest of the sync response here.
+///
+///     Ok(())
+/// }
 /// # Ok(())
 /// # }
 /// ```
+///
+/// It is important to note that the names of the fields in the response shown
+/// in the example match the names of the fields specified in the [sync]
+/// response specification.
+///
+/// It is critical to note that due to the ephemeral nature of to-device
+/// events[[1]](https://spec.matrix.org/unstable/client-server-api/#server-behaviour-4),
+/// it is important to process these events before persisting the `next_batch`
+/// sync token. This is because if the `next_batch` sync token is persisted
+/// before processing the to-device events, some messages might be lost, leading
+/// to decryption failures.
 ///
 /// ## Decrypting room events
 ///
@@ -433,8 +581,8 @@ pub mod vodozemac {
 /// exchanged between devices to decrypt the events. The decrypted events can
 /// then be processed and displayed to the user in the Matrix client.
 ///
-/// Room events can be decrypted using the [`OlmMachine::decrypt_room_event()`]
-/// method.
+/// Room message [events] can be decrypted using the
+/// [`OlmMachine::decrypt_room_event()`] method:
 ///
 /// ```no_run
 /// # use std::collections::BTreeMap;
@@ -450,6 +598,16 @@ pub mod vodozemac {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// It's worth mentioning that the [`OlmMachine::decrypt_room_event()`] method
+/// is designed to be thread-safe and can be safely called concurrently. This
+/// means that room message [events] can be processed in parallel, improving the
+/// overall efficiency of the end-to-end encryption implementation.
+///
+/// By allowing room message [events] to be processed concurrently, the client's
+/// implementation can take full advantage of the capabilities of modern
+/// hardware and achieve better performance, especially when dealing with a
+/// large number of messages at once.
 ///
 /// # Encryption
 ///
@@ -475,6 +633,20 @@ pub mod vodozemac {
 ///
 /// ## Tracking users
 ///
+/// [Tracking the device list for a user]
+///
+/// ```mermaid
+/// sequenceDiagram
+/// actor Alice
+/// participant Homeserver
+///
+/// Alice->>Homeserver: Request to sync changes
+/// Homeserver->>Alice: Users whose device list has changed
+/// Alice->>Alice: Mark user's devicel list as outdated
+/// Alice->>Homeserver: Ask the server for the new device list of all the outdated users
+/// Alice->>Alice: Update the local device list and mark the users as up-to-date
+/// ```
+///
 /// ```no_run
 /// # use std::collections::{BTreeMap, HashSet};
 /// # use anyhow::Result;
@@ -489,6 +661,7 @@ pub mod vodozemac {
 /// # Ok(())
 /// # }
 /// ```
+///
 ///
 /// TODO
 ///
@@ -570,7 +743,7 @@ pub mod vodozemac {
 /// # let event = unimplemented!();
 /// # let machine: OlmMachine = unimplemented!();
 /// // Decrypt each room event you'd like to display to the user using this method.
-/// let decrypted = machine.decrypt_room_event(event, room_id)?;
+/// let decrypted = machine.decrypt_room_event(event, room_id).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -580,6 +753,10 @@ pub mod vodozemac {
 ///
 ///
 /// # Verification
+///
+/// TODO
+///
+/// # Room key backups
 ///
 /// TODO
 ///
@@ -593,6 +770,9 @@ pub mod vodozemac {
 /// [client-server specification]: https://matrix.org/docs/spec/client_server/
 /// [forward secrecy]: https://en.wikipedia.org/wiki/Forward_secrecy
 /// [replay attacks]: https://en.wikipedia.org/wiki/Replay_attack
-///
+/// [Tracking the device list for a user]: https://spec.matrix.org/unstable/client-server-api/#tracking-the-device-list-for-a-user
 /// [X3DH]: https://signal.org/docs/specifications/x3dh/
+/// [to-device]: https://spec.matrix.org/unstable/client-server-api/#send-to-device-messaging
+/// [sync]: https://spec.matrix.org/unstable/client-server-api/#get_matrixclientv3sync
+/// [events]: https://spec.matrix.org/unstable/client-server-api/#events
 pub mod tutorial {}
