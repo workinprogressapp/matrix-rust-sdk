@@ -567,11 +567,10 @@ pub mod vodozemac {
 /// response specification.
 ///
 /// It is critical to note that due to the ephemeral nature of to-device
-/// events[[1]](https://spec.matrix.org/unstable/client-server-api/#server-behaviour-4),
-/// it is important to process these events before persisting the `next_batch`
-/// sync token. This is because if the `next_batch` sync token is persisted
-/// before processing the to-device events, some messages might be lost, leading
-/// to decryption failures.
+/// events[[1]], it is important to process these events before persisting the
+/// `next_batch` sync token. This is because if the `next_batch` sync token is
+/// persisted before processing the to-device events, some messages might be
+/// lost, leading to decryption failures.
 ///
 /// ## Decrypting room events
 ///
@@ -598,7 +597,6 @@ pub mod vodozemac {
 /// # Ok(())
 /// # }
 /// ```
-///
 /// It's worth mentioning that the [`OlmMachine::decrypt_room_event()`] method
 /// is designed to be thread-safe and can be safely called concurrently. This
 /// means that room message [events] can be processed in parallel, improving the
@@ -611,6 +609,17 @@ pub mod vodozemac {
 ///
 /// # Encryption
 ///
+/// 1. [Cryptographic devices of other users need to be
+/// discovered](#tracking-users)
+///
+/// 2. [Secure channels between the devices need to be
+/// established](#establishing-end-to-end-encrypted-channels)
+///
+/// 3. [A room key needs to be exchanged with the group](exchanging-room-keys)
+///
+/// 4. [Individual messages need to be encrypted using the room
+/// key](encrypting-room-events)
+///
 /// TODO
 ///
 /// ```mermaid
@@ -619,8 +628,8 @@ pub mod vodozemac {
 /// participant Homeserver
 /// actor Bob
 ///
-/// Alice->>Homeserver: Download Bob's one-time
-/// Homeserver->>Alice: Bob's one-time keys
+/// Alice->>Homeserver: Download Bob's one-time prekey
+/// Homeserver->>Alice: Bob's one-time prekey
 /// Alice->>Alice: Encrypt the room key
 /// Alice->>Homeserver: Send the room key to each of Bob's devices
 /// Homeserver->>Bob: Deliver the room key
@@ -775,4 +784,6 @@ pub mod vodozemac {
 /// [to-device]: https://spec.matrix.org/unstable/client-server-api/#send-to-device-messaging
 /// [sync]: https://spec.matrix.org/unstable/client-server-api/#get_matrixclientv3sync
 /// [events]: https://spec.matrix.org/unstable/client-server-api/#events
+///
+/// [1]: https://spec.matrix.org/unstable/client-server-api/#server-behaviour-4
 pub mod tutorial {}
