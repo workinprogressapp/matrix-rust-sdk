@@ -128,12 +128,12 @@ pub mod vodozemac {
 /// end-to-end encryption, including the [Olm] and [Megolm] protocols, you may
 /// choose to skip directly to the [Getting Started](#getting-started) section.
 ///
-/// # Table of contents
+/// # Table of Contents
 /// 1. [Introduction](#introduction)
 /// 2. [Getting started](#getting-started)
-/// 3. [Decrypting room events](decryption)
-/// 4. [Encrypting room events](encryption)
-/// 5. [Interactively verifying devices and user identities](verification)
+/// 3. [Decrypting room events](#decryption)
+/// 4. [Encrypting room events](#encryption)
+/// 5. [Interactively verifying devices and user identities](#verification)
 ///
 /// # Introduction
 ///
@@ -551,7 +551,7 @@ pub mod vodozemac {
 ///         )
 ///         .await?;
 ///
-///     // Send out the outgoing requests that receiving sync changes produced.
+///     // Send the outgoing requests out that the sync changes produced.
 ///     process_outgoing_requests(client).await?;
 ///
 ///     // Process the rest of the sync response here.
@@ -611,7 +611,19 @@ pub mod vodozemac {
 ///
 /// # Encryption
 ///
-/// TODO
+/// In this section of the guide, we will focus on enabling the encryption of
+/// messages in our Matrix client library. Up until this point, we have been
+/// discussing the process of decrypting messages that have been encrypted by
+/// other devices. Now, we will shift our focus to the process of encrypting
+/// messages on the client side, so that they can be securely transmitted over
+/// the Matrix network to other devices.
+///
+/// This section will guide you through the steps required to set up the
+/// encryption process, including establishing the necessary sessions and
+/// encrypting messages using the Megolm group session
+///
+/// The process for enabling encryption in a two-device scenario is depicted in
+/// the following sequence diagram:
 ///
 /// ```mermaid
 /// sequenceDiagram
@@ -629,18 +641,42 @@ pub mod vodozemac {
 /// Homeserver->>Bob: Deliver the encrypted message
 /// ```
 ///
-/// TODO
+/// In the following subsections, we will provide a step-by-step guide on how to
+/// enable the encryption of messages using the OlmMachine. We will outline the
+/// specific method calls and usage patterns that are required to establish the
+/// necessary sessions, encrypt messages, and send them over the Matrix network.
+///
+/// 1. [Track the device list of users](#tracking-users)
+///
+/// 2. [Establishing 1-to-1 secure
+/// channels](#establishing-end-to-end-encrypted-channels)
+///
+/// 3. [Exchanging room keys](#exchanging-room-keys)
+///
+/// 4. [Encrypting room events](#encrypting-room-events)
 ///
 /// ## Tracking users
 ///
-/// [Tracking the device list for a user]
+/// The first step in the process of encrypting a message and sending it to a
+/// device is to discover the devices that the recipient user has. This can be
+/// achieved by sending a request to the homeserver to retrieve a list of the
+/// recipient's device keys. The response to this request will include the
+/// device keys for all of the devices that belong to the recipient, as well as
+/// information about their current status and whether or not they support
+/// end-to-end encryption.
+///
+/// The process for discovering and keeping track of devices for a user is
+/// outlined in the Matrix specification in the "[Tracking the device list for a
+/// user]" section.
+///
+/// A simplified sequence diagram of the process can also be found bellow.
 ///
 /// ```mermaid
 /// sequenceDiagram
 /// actor Alice
 /// participant Homeserver
 ///
-/// Alice->>Homeserver: Request to sync changes
+/// Alice->>Homeserver: Sync with the homeserver
 /// Homeserver->>Alice: Users whose device list has changed
 /// Alice->>Alice: Mark user's devicel list as outdated
 /// Alice->>Homeserver: Ask the server for the new device list of all the outdated users
