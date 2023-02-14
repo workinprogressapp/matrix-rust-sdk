@@ -609,6 +609,18 @@ pub mod vodozemac {
 ///
 /// # Encryption
 ///
+/// In this section of the guide, we will focus on enabling the encryption of
+/// messages in our Matrix client library. Up until this point, we have been
+/// discussing the process of decrypting messages that have been encrypted by
+/// other devices. Now, we will shift our focus to the process of encrypting
+/// messages on the client side, so that they can be securely transmitted over
+/// the Matrix network to other devices.
+///
+/// This section will guide you through the steps required to set up the
+/// encryption process, including establishing the necessary sessions and
+/// encrypting messages using the Megolm group session. The specific steps are
+/// outlined bellow:
+///
 /// 1. [Cryptographic devices of other users need to be
 /// discovered](#tracking-users)
 ///
@@ -620,19 +632,8 @@ pub mod vodozemac {
 /// 4. [Individual messages need to be encrypted using the room
 /// key](#encrypting-room-events)
 ///
-/// In this section of the guide, we will focus on enabling the encryption of
-/// messages in our Matrix client library. Up until this point, we have been
-/// discussing the process of decrypting messages that have been encrypted by
-/// other devices. Now, we will shift our focus to the process of encrypting
-/// messages on the client side, so that they can be securely transmitted over
-/// the Matrix network to other devices.
-///
-/// This section will guide you through the steps required to set up the
-/// encryption process, including establishing the necessary sessions and
-/// encrypting messages using the Megolm group session
-///
-/// The process for enabling encryption in a two-device scenario is depicted in
-/// the following sequence diagram:
+/// The process for enabling encryption in a two-device scenario is also
+/// depicted in the following sequence diagram:
 ///
 /// ```mermaid
 /// sequenceDiagram
@@ -654,15 +655,6 @@ pub mod vodozemac {
 /// enable the encryption of messages using the OlmMachine. We will outline the
 /// specific method calls and usage patterns that are required to establish the
 /// necessary sessions, encrypt messages, and send them over the Matrix network.
-///
-/// 1. [Track the device list of users](#tracking-users)
-///
-/// 2. [Establishing 1-to-1 secure
-/// channels](#establishing-end-to-end-encrypted-channels)
-///
-/// 3. [Exchanging room keys](#exchanging-room-keys)
-///
-/// 4. [Encrypting room events](#encrypting-room-events)
 ///
 /// ## Tracking users
 ///
