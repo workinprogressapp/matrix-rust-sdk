@@ -684,27 +684,108 @@ pub mod vodozemac {
 /// Alice->>Alice: Update the local device list and mark the users as up-to-date
 /// ```
 ///
+/// The OlmMachine refers to users whose devices we are tracking as "tracked
+/// users" and utilizes the [`OlmMachine::update_tracked_users()`] method to
+/// start considering users to be tracked. Keeping the above diagram in mind, we
+/// can now update our sync method as follows:
+///
 /// ```no_run
-/// # use std::collections::{BTreeMap, HashSet};
 /// # use anyhow::Result;
-/// # use ruma::UserId;
+/// # use std::ops::Deref;
 /// # use matrix_sdk_crypto::OlmMachine;
+/// # use ruma::api::client::sync::sync_events::v3::{Response, JoinedRoom};
+/// # use ruma::{OwnedUserId, serde::Raw, events::AnySyncStateEvent};
 /// # #[tokio::main]
 /// # async fn main() -> Result<()> {
-/// # let users: HashSet<&UserId> = HashSet::new();
-/// # let machine: OlmMachine = unimplemented!();
-/// // Mark all the users that are part of an encrypted room as tracked
-/// machine.update_tracked_users(users).await?;
+/// # struct Client {
+/// #     outgoing_requests_lock: tokio::sync::Mutex<()>,
+/// #     olm_machine: OlmMachine,
+/// # }
+/// # async fn process_outgoing_requests(client: &Client) -> Result<()> {
+/// #    unimplemented!();
+/// # }
+/// # async fn send_out_sync_request(client: &Client) -> Result<Response> {
+/// #    unimplemented!();
+/// # }
+/// # fn is_member_event_of_a_joined_user(event: &Raw<AnySyncStateEvent>) -> bool {
+/// #     true
+/// # }
+/// # fn get_user_id(event: &Raw<AnySyncStateEvent>) -> OwnedUserId {
+/// #     unimplemented!();
+/// # }
+/// # fn is_room_encrypted(room: &JoinedRoom) -> bool {
+/// #     true
+/// # }
+/// async fn sync(client: &Client) -> Result<()> {
+///     process_outgoing_requests(client).await?;
+///
+///     let response = send_out_sync_request(client).await?;
+///
+///     // Push the sync changes into the OlmMachine, make sure that this is
+///     // happening before the `next_batch` token of the sync is persisted.
+///     let to_device_events = client
+///         .olm_machine
+///         .receive_sync_changes(
+///             response.to_device.events,
+///             &response.device_lists,
+///             &response.device_one_time_keys_count,
+///             response.device_unused_fallback_key_types.as_deref(),
+///         )
+///         .await?;
+///
+///     // Send the outgoing requests out that the sync changes produced.
+///     process_outgoing_requests(client).await?;
+///
+///     // Collect all the joined and invited users of our end-to-end encrypted rooms here.
+///     let mut users = Vec::new();
+///
+///     for (_, room) in &response.rooms.join {
+///         // For simplicity reasons we're only looking at the state field of a joined room, but
+///         // the events in the timeline are important as well.
+///         for event in &room.state.events {
+///             if is_member_event_of_a_joined_user(event) && is_room_encrypted(room) {
+///                 let user_id = get_user_id(event);
+///                 users.push(user_id);
+///             }
+///         }
+///     }
+///
+///     // Mark all the users that we consider to be in a end-to-end encrypted room with us to be
+///     // tracked. We need to know about all the devices each user has so we can later encrypt
+///     // messages for each of their devices.
+///     client.olm_machine.update_tracked_users(users.iter().map(Deref::deref)).await?;
+///
+///     // Process the rest of the sync response here.
+///
+///     Ok(())
+/// }
 /// # Ok(())
 /// # }
 /// ```
 ///
-///
-/// TODO
+/// Now that we have discovered the devices of the users we'd like to
+/// communicate with in an end-to-end encrypted manner, we can start considering
+/// encrypting messages for those devices. This concludes the sync processing
+/// method, we are now ready to move on to the next section, which will explain
+/// how to begin the encryption process.
 ///
 /// ## Establishing end-to-end encrypted channels
 ///
-/// TODO
+/// In the Triple Diffie-Hellman section, we described the need for two
+/// Curve25519 keys from the recipient device to establish a 1-to-1 secure
+/// channel: the long-term identity key of a device and a one-time prekey. In
+/// the previous section, we started tracking the device keys, including the
+/// long-term identity key that we need. The next step is to download the
+/// one-time prekey on an on-demand basis and establish the 1-to-1 secure
+/// channel.
+///
+/// To accomplish this, we can use the [`OlmMachine::get_missing_sessions()`]
+/// method in bulk, which will claim the one-time prekey for all the devices of
+/// a user that we're not already sharing a 1-to-1 encrypted channel with.
+///
+/// As with the [`OlmMachine::outgoing_requests()`] method, it is necessary to
+/// protect this method with a lock, otherwise we will be creating more 1-to-1
+/// encrypted channels than necessary.
 ///
 /// ```no_run
 /// # use std::collections::{BTreeMap, HashSet};
@@ -732,7 +813,11 @@ pub mod vodozemac {
 /// # }
 /// ```
 ///
+/// With the ability to exchange messages directly with devices, we can now
+/// start sharing room keys over the 1-to-1 encrypted channel.
+///
 /// ## Exchanging room keys
+///
 ///
 /// TODO
 ///
