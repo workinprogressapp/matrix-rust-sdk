@@ -771,7 +771,9 @@ pub mod vodozemac {
 ///
 /// ## Establishing end-to-end encrypted channels
 ///
-/// In the Triple Diffie-Hellman section, we described the need for two
+/// In the [Triple
+/// Diffie-Hellman](#using-the-triple-diffie-hellman-key-agreement-protocol)
+/// section, we described the need for two
 /// Curve25519 keys from the recipient device to establish a 1-to-1 secure
 /// channel: the long-term identity key of a device and a one-time prekey. In
 /// the previous section, we started tracking the device keys, including the
@@ -818,8 +820,18 @@ pub mod vodozemac {
 ///
 /// ## Exchanging room keys
 ///
+/// To exchange a room key with our group, we will once again take a bulk
+/// approach. The [`OlmMachine::share_room_key()`] method is used to accomplish
+/// this step. This method will create a new room key, if necessary, and encrypt
+/// it for each device belonging to the users provided as an argument. It will
+/// then output an array of sendToDevice requests that we must send to the
+/// server, and mark the requests as sent.
 ///
-/// TODO
+/// Like some of the previous methods, OlmMachine::share_room_key() needs to be
+/// protected by a lock to prevent the possibility of creating and sending
+/// multiple room keys simultaneously for the same group. The lock can be
+/// implemented on a per-room basis, which allows for parallel room key
+/// exchanges across different rooms.
 ///
 /// ```no_run
 /// # use std::collections::{BTreeMap, HashSet};
@@ -838,13 +850,14 @@ pub mod vodozemac {
 /// # let room_id = unimplemented!();
 /// # let settings = EncryptionSettings::default();
 /// # let machine: OlmMachine = unimplemented!();
-/// // Mark all the users that are part of an encrypted room as tracked
+/// // Let's share a room key with our group.
 /// let requests = machine.share_room_key(
 ///     room_id,
 ///     users.iter().map(Deref::deref),
-///     settings
+///     EncryptionSettings::default(),
 /// ).await?;
 ///
+/// // Make sure each request is sent out
 /// for request in requests {
 ///     let request_id = &request.txn_id;
 ///     let response = send_request(&request).await?;
@@ -853,6 +866,11 @@ pub mod vodozemac {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// In order to ensure that room keys are rotated and exchanged when needed, the
+/// OlmMachine::share_room_key() method should be called before sending every
+/// room message in an end-to-end encrypted room. If a room key has already been
+/// exchanged, the method becomes a no-op.
 ///
 /// ## Encrypting room events
 ///
@@ -869,16 +887,103 @@ pub mod vodozemac {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// ## Appendix: Combining the session creation and room key exchange
+///
+/// ```no_run
+/// # use std::collections::{BTreeMap, HashSet};
+/// # use std::ops::Deref;
+/// # use anyhow::Result;
+/// # use serde_json::json;
+/// # use ruma::{UserId, RoomId};
+/// # use ruma::api::client::keys::claim_keys::v3::{Response, Request};
+/// # use matrix_sdk_crypto::{EncryptionSettings, OlmMachine, ToDeviceRequest};
+/// # use matrix_sdk_common::locks::MutexGuard;
+/// # async fn send_request(request: &Request) -> Result<Response> {
+/// #     let response = unimplemented!();
+/// #     Ok(response)
+/// # }
+/// # async fn send_to_device_request(request: &ToDeviceRequest) -> Result<Response> {
+/// #     let response = unimplemented!();
+/// #     Ok(response)
+/// # }
+/// # async fn acquire_per_room_lock(room_id: &RoomId) -> MutexGuard<()> {
+/// #     unimplemented!();
+/// # }
+/// # async fn get_joined_members(room_id: &RoomId) -> Vec<&UserId> {
+/// #    unimplemented!();
+/// # }
+/// # fn is_room_encrypted(room_id: &RoomId) -> bool {
+/// #     true
+/// # }
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # let users: HashSet<&UserId> = HashSet::new();
+/// # let machine: OlmMachine = unimplemented!();
+/// struct Client {
+///     session_establishment_lock: tokio::sync::Mutex<()>,
+///     olm_machine: OlmMachine,
+/// }
+///
+/// async fn establish_sessions(client: &Client, users: &[&UserId]) -> Result<()> {
+///     if let Some((request_id, request)) =
+///         client.olm_machine.get_missing_sessions(users.iter().map(Deref::deref)).await?
+///     {
+///         let response = send_request(&request).await?;
+///         client.olm_machine.mark_request_as_sent(&request_id, &response).await?;
+///     }
+///
+///     Ok(())
+/// }
+///
+/// async fn share_room_key(machine: &OlmMachine, room_id: &RoomId, users: &[&UserId]) -> Result<()> {
+///     let _lock = acquire_per_room_lock(room_id).await;
+///
+///     let requests = machine.share_room_key(
+///             room_id,
+///             users.iter().map(Deref::deref),
+///             EncryptionSettings::default(),
+///     ).await?;
+///
+///     // Make sure each request is sent out
+///     for request in requests {
+///         let request_id = &request.txn_id;
+///         let response = send_to_device_request(&request).await?;
+///         machine.mark_request_as_sent(&request_id, &response).await?;
+///     }
+///
+///     Ok(())
+/// }
+///
+/// async fn send_message(client: &Client, room_id: &RoomId, message: &str) -> Result<()> {
+///     let mut content = json!({
+///         "body": message,
+///             "msgtype": "m.text",
+///     });
+///
+///     if is_room_encrypted(room_id) {
+///         let content = json!({
+///             "body": message,
+///             "msgtype": "m.text",
+///         });
+///
+///         let users = get_joined_members(room_id).await;
+///
+///         establish_sessions(client, &users).await?;
+///         share_room_key(&client.olm_machine, room_id, &users).await?;
+///
+///         let encrypted = client
+///             .olm_machine
+///             .encrypt_room_event_raw(room_id, content, "m.room.message")
+///             .await?;
+///     }
+///
+///     Ok(())
+/// }
+/// # Ok(())
+/// # }
+/// ```
 
-///
-/// TODO
-///
-///
-/// # Verification
-///
-/// TODO
-///
-/// # Room key backups
 ///
 /// TODO
 ///
