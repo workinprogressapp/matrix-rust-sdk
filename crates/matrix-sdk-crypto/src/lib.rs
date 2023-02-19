@@ -308,7 +308,7 @@ pub mod vodozemac {
 /// ```ignore
 /// use anyhow::Result;
 /// use matrix_sdk_crypto::OlmMachine;
-/// use matrix_sdk_sled::SledCryptoStore;
+/// use matrix_sdk_sqlite::SqliteCryptoStore;
 /// use ruma::user_id;
 ///
 /// # #[tokio::main]
@@ -316,7 +316,7 @@ pub mod vodozemac {
 /// let user_id = user_id!("@alice:localhost");
 /// let device_id = "DEVICEID".into();
 ///
-/// let store = SledCryptoStore::open("/home/example/matrix-client/").await?;
+/// let store = SqliteCryptoStore::open("/home/example/matrix-client/", None).await?;
 ///
 /// let machine = OlmMachine::with_store(user_id, device_id, store).await;
 /// # Ok(())
@@ -404,6 +404,8 @@ pub mod vodozemac {
 /// # Ok(())
 /// # }
 /// ```
+///
+/// #### 🔒 Locking rule
 ///
 /// It's important to note that the outgoing requests method in the
 /// [`OlmMachine`], while thread-safe, may return the same request multiple
@@ -785,6 +787,8 @@ pub mod vodozemac {
 /// method in bulk, which will claim the one-time prekey for all the devices of
 /// a user that we're not already sharing a 1-to-1 encrypted channel with.
 ///
+/// #### 🔒 Locking rule
+///
 /// As with the [`OlmMachine::outgoing_requests()`] method, it is necessary to
 /// protect this method with a lock, otherwise we will be creating more 1-to-1
 /// encrypted channels than necessary.
@@ -826,6 +830,8 @@ pub mod vodozemac {
 /// it for each device belonging to the users provided as an argument. It will
 /// then output an array of sendToDevice requests that we must send to the
 /// server, and mark the requests as sent.
+///
+/// #### 🔒 Locking rule
 ///
 /// Like some of the previous methods, OlmMachine::share_room_key() needs to be
 /// protected by a lock to prevent the possibility of creating and sending
@@ -889,6 +895,9 @@ pub mod vodozemac {
 /// ```
 ///
 /// ## Appendix: Combining the session creation and room key exchange
+///
+/// The steps from the previous three sections should combined into a single method that is used to
+/// send messages.
 ///
 /// ```no_run
 /// # use std::collections::{BTreeMap, HashSet};
