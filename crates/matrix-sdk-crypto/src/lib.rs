@@ -270,6 +270,14 @@ pub mod vodozemac {
 ///
 /// ## Speeding up encryption for large groups
 ///
+/// In the previous section we learned how to utilize a key agreement protocol
+/// to establish secure 1-to-1 encrypted communication channels. These channels
+/// allow us to encrypt a message for each device separately.
+///
+/// One critical property of these channels is that, if you want to send a
+/// message to a group of devices, we'll need to encrypt the message for each
+/// device individually.
+///
 /// TODO Explain how megolm fits into this
 ///
 /// # Getting started
@@ -896,8 +904,8 @@ pub mod vodozemac {
 ///
 /// ## Appendix: Combining the session creation and room key exchange
 ///
-/// The steps from the previous three sections should combined into a single method that is used to
-/// send messages.
+/// The steps from the previous three sections should combined into a single
+/// method that is used to send messages.
 ///
 /// ```no_run
 /// # use std::collections::{BTreeMap, HashSet};
