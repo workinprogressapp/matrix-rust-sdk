@@ -24,21 +24,28 @@ use ruma::{
     },
     assign,
     events::{
-        room::message::RoomMessageEventContent, EmptyStateKey, MessageLikeEventContent,
-        StateEventContent,
+        receipt::ReceiptThread,
+        room::{
+            avatar::{ImageInfo, RoomAvatarEventContent},
+            message::RoomMessageEventContent,
+            name::RoomNameEventContent,
+            power_levels::RoomPowerLevelsEventContent,
+            topic::RoomTopicEventContent,
+        },
+        EmptyStateKey, MessageLikeEventContent, StateEventContent,
     },
     serde::Raw,
-    EventId, OwnedTransactionId, TransactionId, UserId,
+    EventId, Int, MxcUri, OwnedEventId, OwnedTransactionId, TransactionId, UserId,
 };
 use serde_json::Value;
-use tracing::debug;
-#[cfg(feature = "e2e-encryption")]
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use super::Left;
 use crate::{
-    attachment::AttachmentConfig, error::HttpResult, room::Common, BaseRoom, Client, Result,
-    RoomType,
+    attachment::AttachmentConfig,
+    error::{Error, HttpResult},
+    room::Common,
+    BaseRoom, Client, Result, RoomState,
 };
 #[cfg(feature = "image-proc")]
 use crate::{
@@ -51,9 +58,9 @@ const TYPING_NOTICE_RESEND_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A room in the joined state.
 ///
-/// The `JoinedRoom` contains all methods specific to a `Room` with type
-/// `RoomType::Joined`. Operations may fail once the underlying `Room` changes
-/// `RoomType`.
+/// The `JoinedRoom` contains all methods specific to a `Room` with
+/// `RoomState::Joined`. Operations may fail once the underlying `Room` changes
+/// `RoomState`.
 #[derive(Debug, Clone)]
 pub struct Joined {
     pub(crate) inner: Common,
@@ -68,15 +75,15 @@ impl Deref for Joined {
 }
 
 impl Joined {
-    /// Create a new `room::Joined` if the underlying `BaseRoom` has type
-    /// `RoomType::Joined`.
+    /// Create a new `room::Joined` if the underlying `BaseRoom` has
+    /// `RoomState::Joined`.
     ///
     /// # Arguments
     /// * `client` - The client used to make requests.
     ///
     /// * `room` - The underlying room.
     pub(crate) fn new(client: &Client, room: BaseRoom) -> Option<Self> {
-        if room.room_type() == RoomType::Joined {
+        if room.state() == RoomState::Joined {
             Some(Self { inner: Common::new(client.clone(), room) })
         } else {
             None
@@ -84,6 +91,7 @@ impl Joined {
     }
 
     /// Leave this room.
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn leave(&self) -> Result<Left> {
         self.inner.leave().await
     }
@@ -95,6 +103,7 @@ impl Joined {
     /// * `user_id` - The user to ban with `UserId`.
     ///
     /// * `reason` - The reason for banning this user.
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn ban_user(&self, user_id: &UserId, reason: Option<&str>) -> Result<()> {
         let request = assign!(
             ban_user::v3::Request::new(self.inner.room_id().to_owned(), user_id.to_owned()),
@@ -112,6 +121,7 @@ impl Joined {
     ///   room.
     ///
     /// * `reason` - Optional reason why the room member is being kicked out.
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn kick_user(&self, user_id: &UserId, reason: Option<&str>) -> Result<()> {
         let request = assign!(
             kick_user::v3::Request::new(self.inner.room_id().to_owned(), user_id.to_owned()),
@@ -126,6 +136,7 @@ impl Joined {
     /// # Arguments
     ///
     /// * `user_id` - The `UserId` of the user to invite to the room.
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn invite_user_by_id(&self, user_id: &UserId) -> Result<()> {
         let recipient = InvitationRecipient::UserId { user_id: user_id.to_owned() };
 
@@ -140,6 +151,7 @@ impl Joined {
     /// # Arguments
     ///
     /// * `invite_id` - A third party id of a user to invite to the room.
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn invite_user_by_3pid(&self, invite_id: Invite3pid) -> Result<()> {
         let recipient = InvitationRecipient::ThirdPartyId(invite_id);
         let request = invite_user::v3::Request::new(self.inner.room_id().to_owned(), recipient);
@@ -207,63 +219,85 @@ impl Joined {
         };
 
         if send {
-            let typing = if typing {
-                self.client
-                    .inner
-                    .typing_notice_times
-                    .insert(self.inner.room_id().to_owned(), Instant::now());
-                Typing::Yes(TYPING_NOTICE_TIMEOUT)
-            } else {
-                self.client.inner.typing_notice_times.remove(self.inner.room_id());
-                Typing::No
-            };
-
-            let request = TypingRequest::new(
-                self.inner.own_user_id().to_owned(),
-                self.inner.room_id().to_owned(),
-                typing,
-            );
-            self.client.send(request, None).await?;
+            self.send_typing_notice(typing).await?;
         }
 
         Ok(())
     }
 
-    /// Send a request to notify this room that the user has read specific
-    /// event.
+    #[instrument(name = "typing_notice", skip(self), parent = &self.client.inner.root_span)]
+    async fn send_typing_notice(&self, typing: bool) -> Result<()> {
+        let typing = if typing {
+            self.client
+                .inner
+                .typing_notice_times
+                .insert(self.inner.room_id().to_owned(), Instant::now());
+            Typing::Yes(TYPING_NOTICE_TIMEOUT)
+        } else {
+            self.client.inner.typing_notice_times.remove(self.inner.room_id());
+            Typing::No
+        };
+
+        let request = TypingRequest::new(
+            self.inner.own_user_id().to_owned(),
+            self.inner.room_id().to_owned(),
+            typing,
+        );
+
+        self.client.send(request, None).await?;
+
+        Ok(())
+    }
+
+    /// Send a request to set a single receipt.
     ///
     /// # Arguments
     ///
-    /// * `event_id` - The `EventId` specifies the event to set the read receipt
-    ///   on.
-    pub async fn read_receipt(&self, event_id: &EventId) -> Result<()> {
-        let request = create_receipt::v3::Request::new(
+    /// * `receipt_type` - The type of the receipt to set. Note that it is
+    ///   possible to set the fully-read marker although it is technically not a
+    ///   receipt.
+    ///
+    /// * `thread` - The thread where this receipt should apply, if any. Note
+    ///   that this must be [`ReceiptThread::Unthreaded`] when sending a
+    ///   [`ReceiptType::FullyRead`].
+    ///
+    /// * `event_id` - The `EventId` of the event to set the receipt on.
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
+    pub async fn send_single_receipt(
+        &self,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        event_id: OwnedEventId,
+    ) -> Result<()> {
+        let mut request = create_receipt::v3::Request::new(
             self.inner.room_id().to_owned(),
-            ReceiptType::Read,
-            event_id.to_owned(),
+            receipt_type,
+            event_id,
         );
+        request.thread = thread;
 
         self.client.send(request, None).await?;
         Ok(())
     }
 
-    /// Send a request to notify this room that the user has read up to specific
-    /// event.
+    /// Send a request to set multiple receipts at once.
     ///
     /// # Arguments
     ///
-    /// * fully_read - The `EventId` of the event the user has read to.
+    /// * `receipts` - The `Receipts` to send.
     ///
-    /// * read_receipt - An `EventId` to specify the event to set the read
-    ///   receipt on.
-    pub async fn read_marker(
-        &self,
-        fully_read: &EventId,
-        read_receipt: Option<&EventId>,
-    ) -> Result<()> {
+    /// If `receipts` is empty, this is a no-op.
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
+    pub async fn send_multiple_receipts(&self, receipts: Receipts) -> Result<()> {
+        if receipts.is_empty() {
+            return Ok(());
+        }
+
+        let Receipts { fully_read, read_receipt, private_read_receipt } = receipts;
         let request = assign!(set_read_marker::v3::Request::new(self.inner.room_id().to_owned()), {
-            fully_read: Some(fully_read.to_owned()),
-            read_receipt: read_receipt.map(ToOwned::to_owned),
+            fully_read,
+            read_receipt,
+            private_read_receipt,
         });
 
         self.client.send(request, None).await?;
@@ -301,6 +335,7 @@ impl Joined {
     /// }
     /// # anyhow::Ok(()) });
     /// ```
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn enable_encryption(&self) -> Result<()> {
         use ruma::{
             events::room::encryption::RoomEncryptionEventContent, EventEncryptionAlgorithm,
@@ -327,25 +362,25 @@ impl Joined {
     /// room if necessary and share a room key that can be shared with them.
     ///
     /// Does nothing if no room key needs to be shared.
+    // TODO: expose this publicly so people can pre-share a group session if
+    // e.g. a user starts to type a message for a room.
     #[cfg(feature = "e2e-encryption")]
     #[instrument(skip_all, fields(room_id = ?self.room_id()))]
     async fn preshare_room_key(&self) -> Result<()> {
-        // TODO: expose this publicly so people can pre-share a group session if
-        // e.g. a user starts to type a message for a room.
-        if let Some(mutex) =
-            self.client.inner.group_session_locks.get(self.inner.room_id()).map(|m| m.clone())
-        {
+        let mut map = self.client.inner.group_session_locks.lock().await;
+
+        if let Some(mutex) = map.get(self.inner.room_id()).cloned() {
             // If a group session share request is already going on, await the
             // release of the lock.
+            drop(map);
             _ = mutex.lock().await;
         } else {
             // Otherwise create a new lock and share the group
             // session.
             let mutex = Arc::new(Mutex::new(()));
-            self.client
-                .inner
-                .group_session_locks
-                .insert(self.inner.room_id().to_owned(), mutex.clone());
+            map.insert(self.inner.room_id().to_owned(), mutex.clone());
+
+            drop(map);
 
             let _guard = mutex.lock().await;
 
@@ -359,7 +394,7 @@ impl Joined {
 
             let response = self.share_room_key().await;
 
-            self.client.inner.group_session_locks.remove(self.inner.room_id());
+            self.client.inner.group_session_locks.lock().await.remove(self.inner.room_id());
 
             // If one of the responses failed invalidate the group
             // session as using it would end up in undecryptable
@@ -401,8 +436,9 @@ impl Joined {
     /// Warning: This waits until a sync happens and does not return if no sync
     /// is happening! It can also return early when the room is not a joined
     /// room anymore!
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn sync_up(&self) {
-        while !self.is_synced() && self.room_type() == RoomType::Joined {
+        while !self.is_synced() && self.state() == RoomState::Joined {
             self.client.inner.sync_beat.listen().wait_timeout(Duration::from_secs(1));
         }
     }
@@ -591,7 +627,7 @@ impl Joined {
                 );
 
                 if !self.are_members_synced() {
-                    self.request_members().await?;
+                    self.ensure_members().await?;
                     // TODO query keys here?
                 }
 
@@ -671,6 +707,7 @@ impl Joined {
     /// }
     /// # anyhow::Ok(()) });
     /// ```
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn send_attachment(
         &self,
         body: &str,
@@ -687,12 +724,26 @@ impl Joined {
             #[cfg(feature = "image-proc")]
             let data_slot;
             #[cfg(feature = "image-proc")]
-            let thumbnail = if config.generate_thumbnail {
-                match generate_image_thumbnail(
-                    content_type,
-                    Cursor::new(&data),
-                    config.thumbnail_size,
-                ) {
+            let (data, thumbnail) = if config.generate_thumbnail {
+                let content_type = content_type.clone();
+                let make_thumbnail = move |data| {
+                    let res = generate_image_thumbnail(
+                        &content_type,
+                        Cursor::new(&data),
+                        config.thumbnail_size,
+                    );
+                    (data, res)
+                };
+
+                #[cfg(not(target_arch = "wasm32"))]
+                let (data, res) = tokio::task::spawn_blocking(move || make_thumbnail(data))
+                    .await
+                    .expect("Task join error");
+
+                #[cfg(target_arch = "wasm32")]
+                let (data, res) = make_thumbnail(data);
+
+                let thumbnail = match res {
                     Ok((thumbnail_data, thumbnail_info)) => {
                         data_slot = thumbnail_data;
                         Some(Thumbnail {
@@ -705,9 +756,11 @@ impl Joined {
                         ImageError::ThumbnailBiggerThanOriginal | ImageError::FormatNotSupported,
                     ) => None,
                     Err(error) => return Err(error.into()),
-                }
+                };
+
+                (data, thumbnail)
             } else {
-                None
+                (data, None)
             };
 
             let config = AttachmentConfig {
@@ -781,6 +834,93 @@ impl Joined {
         self.send(RoomMessageEventContent::new(content), config.txn_id.as_deref()).await
     }
 
+    /// Update the power levels of a select set of users of this room.
+    ///
+    /// Issue a `power_levels` state event request to the server, changing the
+    /// given UserId -> Int levels. May fail if the `power_levels` aren't
+    /// locally known yet or the server rejects the state event update, e.g.
+    /// because of insufficient permissions. Neither permissions to update
+    /// nor whether the data might be stale is checked prior to issuing the
+    /// request.
+    pub async fn update_power_levels(
+        &self,
+        updates: Vec<(&UserId, Int)>,
+    ) -> Result<send_state_event::v3::Response> {
+        let raw_pl_event = self
+            .get_state_event_static::<RoomPowerLevelsEventContent>()
+            .await?
+            .ok_or(Error::InsufficientData)?;
+
+        let mut power_levels = raw_pl_event.deserialize()?.power_levels();
+
+        for (user_id, new_level) in updates {
+            if new_level == power_levels.users_default {
+                power_levels.users.remove(user_id);
+            } else {
+                power_levels.users.insert(user_id.to_owned(), new_level);
+            }
+        }
+
+        self.send_state_event(RoomPowerLevelsEventContent::from(power_levels)).await
+    }
+
+    /// Sets the name of this room.
+    pub async fn set_name(&self, name: Option<String>) -> Result<send_state_event::v3::Response> {
+        self.send_state_event(RoomNameEventContent::new(name)).await
+    }
+
+    /// Sets a new topic for this room.
+    pub async fn set_room_topic(&self, topic: &str) -> Result<send_state_event::v3::Response> {
+        let topic_event = RoomTopicEventContent::new(topic.into());
+
+        self.send_state_event(topic_event).await
+    }
+
+    /// Sets the new avatar url for this room.
+    ///
+    /// # Arguments
+    /// * `avatar_url` - The owned matrix uri that represents the avatar
+    /// * `info` - The optional image info that can be provided for the avatar
+    pub async fn set_avatar_url(
+        &self,
+        url: &MxcUri,
+        info: Option<ImageInfo>,
+    ) -> Result<send_state_event::v3::Response> {
+        let mut room_avatar_event = RoomAvatarEventContent::new();
+        room_avatar_event.url = Some(url.to_owned());
+        room_avatar_event.info = info.map(Box::new);
+
+        self.send_state_event(room_avatar_event).await
+    }
+
+    /// Removes the avatar from the room
+    pub async fn remove_avatar(&self) -> Result<send_state_event::v3::Response> {
+        let room_avatar_event = RoomAvatarEventContent::new();
+
+        self.send_state_event(room_avatar_event).await
+    }
+
+    /// Uploads a new avatar for this room.
+    ///
+    /// # Arguments
+    /// * `mime` - The mime type describing the data
+    /// * `data` - The data representation of the avatar
+    /// * `info` - The optional image info provided for the avatar,
+    /// the blurhash and the mimetype will always be updated
+    pub async fn upload_avatar(
+        &self,
+        mime: &Mime,
+        data: Vec<u8>,
+        info: Option<ImageInfo>,
+    ) -> Result<send_state_event::v3::Response> {
+        let upload_response = self.client.media().upload(mime, data).await?;
+        let mut info = info.unwrap_or_else(ImageInfo::new);
+        info.blurhash = upload_response.blurhash;
+        info.mimetype = Some(mime.to_string());
+
+        self.set_avatar_url(&upload_response.content_uri, Some(info)).await
+    }
+
     /// Send a state event with an empty state key to the homeserver.
     ///
     /// For state events with a non-empty state key, see
@@ -824,6 +964,7 @@ impl Joined {
     /// joined_room.send_state_event(content).await?;
     /// # anyhow::Ok(()) };
     /// ```
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn send_state_event(
         &self,
         content: impl StateEventContent<StateKey = EmptyStateKey>,
@@ -923,6 +1064,7 @@ impl Joined {
     /// }
     /// # anyhow::Ok(()) });
     /// ```
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn send_state_event_raw(
         &self,
         content: Value,
@@ -973,6 +1115,7 @@ impl Joined {
     /// }
     /// # anyhow::Ok(()) });
     /// ```
+    #[instrument(skip_all, parent = &self.client.inner.root_span)]
     pub async fn redact(
         &self,
         event_id: &EventId,
@@ -986,5 +1129,58 @@ impl Joined {
         );
 
         self.client.send(request, None).await
+    }
+}
+
+/// Receipts to send all at once.
+#[derive(Debug, Clone, Default)]
+pub struct Receipts {
+    pub(super) fully_read: Option<OwnedEventId>,
+    pub(super) read_receipt: Option<OwnedEventId>,
+    pub(super) private_read_receipt: Option<OwnedEventId>,
+}
+
+impl Receipts {
+    /// Create an empty `Receipts`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the last event the user has read.
+    ///
+    /// It means that the user has read all the events before this event.
+    ///
+    /// This is a private marker only visible by the user.
+    ///
+    /// Note that this is technically not a receipt as it is persisted in the
+    /// room account data.
+    pub fn fully_read_marker(mut self, event_id: impl Into<Option<OwnedEventId>>) -> Self {
+        self.fully_read = event_id.into();
+        self
+    }
+
+    /// Set the last event presented to the user and forward it to the other
+    /// users in the room.
+    ///
+    /// This is used to reset the unread messages/notification count and
+    /// advertise to other users the last event that the user has likely seen.
+    pub fn public_read_receipt(mut self, event_id: impl Into<Option<OwnedEventId>>) -> Self {
+        self.read_receipt = event_id.into();
+        self
+    }
+
+    /// Set the last event presented to the user and don't forward it.
+    ///
+    /// This is used to reset the unread messages/notification count.
+    pub fn private_read_receipt(mut self, event_id: impl Into<Option<OwnedEventId>>) -> Self {
+        self.private_read_receipt = event_id.into();
+        self
+    }
+
+    /// Whether this `Receipts` is empty.
+    pub fn is_empty(&self) -> bool {
+        self.fully_read.is_none()
+            && self.read_receipt.is_none()
+            && self.private_read_receipt.is_none()
     }
 }

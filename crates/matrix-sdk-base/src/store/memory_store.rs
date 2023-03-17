@@ -25,7 +25,7 @@ use ruma::{
     canonical_json::redact,
     events::{
         presence::PresenceEvent,
-        receipt::{Receipt, ReceiptType},
+        receipt::{Receipt, ReceiptThread, ReceiptType},
         room::member::{MembershipState, StrippedRoomMemberEvent, SyncRoomMemberEvent},
         AnyGlobalAccountDataEvent, AnyRoomAccountDataEvent, AnyStrippedStateEvent,
         AnySyncStateEvent, GlobalAccountDataEventType, RoomAccountDataEventType, StateEventType,
@@ -37,7 +37,10 @@ use ruma::{
 use tracing::{debug, info, warn};
 
 use super::{Result, RoomInfo, StateChanges, StateStore, StoreError};
-use crate::{deserialized_responses::RawMemberEvent, media::MediaRequest, MinimalRoomMemberEvent};
+use crate::{
+    deserialized_responses::RawMemberEvent, media::MediaRequest, MinimalRoomMemberEvent,
+    StateStoreDataKey, StateStoreDataValue,
+};
 
 /// In-Memory, non-persistent implementation of the `StateStore`
 ///
@@ -45,6 +48,7 @@ use crate::{deserialized_responses::RawMemberEvent, media::MediaRequest, Minimal
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
+    user_avatar_url: Arc<DashMap<String, String>>,
     sync_token: Arc<RwLock<Option<String>>>,
     filters: Arc<DashMap<String, String>>,
     account_data: Arc<DashMap<GlobalAccountDataEventType, Raw<AnyGlobalAccountDataEvent>>>,
@@ -66,10 +70,17 @@ pub struct MemoryStore {
     stripped_joined_user_ids: Arc<DashMap<OwnedRoomId, DashSet<OwnedUserId>>>,
     stripped_invited_user_ids: Arc<DashMap<OwnedRoomId, DashSet<OwnedUserId>>>,
     presence: Arc<DashMap<OwnedUserId, Raw<PresenceEvent>>>,
-    room_user_receipts:
-        Arc<DashMap<OwnedRoomId, DashMap<String, DashMap<OwnedUserId, (OwnedEventId, Receipt)>>>>,
+    room_user_receipts: Arc<
+        DashMap<
+            OwnedRoomId,
+            DashMap<(String, Option<String>), DashMap<OwnedUserId, (OwnedEventId, Receipt)>>,
+        >,
+    >,
     room_event_receipts: Arc<
-        DashMap<OwnedRoomId, DashMap<String, DashMap<OwnedEventId, DashMap<OwnedUserId, Receipt>>>>,
+        DashMap<
+            OwnedRoomId,
+            DashMap<(String, Option<String>), DashMap<OwnedEventId, DashMap<OwnedUserId, Receipt>>>,
+        >,
     >,
     custom: Arc<DashMap<Vec<u8>, Vec<u8>>>,
 }
@@ -85,6 +96,7 @@ impl MemoryStore {
     /// Create a new empty MemoryStore
     pub fn new() -> Self {
         Self {
+            user_avatar_url: Default::default(),
             sync_token: Default::default(),
             filters: Default::default(),
             account_data: Default::default(),
@@ -112,18 +124,61 @@ impl MemoryStore {
         }
     }
 
-    async fn save_filter(&self, filter_name: &str, filter_id: &str) -> Result<()> {
-        self.filters.insert(filter_name.to_owned(), filter_id.to_owned());
+    async fn get_kv_data(&self, key: StateStoreDataKey<'_>) -> Result<Option<StateStoreDataValue>> {
+        match key {
+            StateStoreDataKey::SyncToken => {
+                Ok(self.sync_token.read().unwrap().clone().map(StateStoreDataValue::SyncToken))
+            }
+            StateStoreDataKey::Filter(filter_name) => Ok(self
+                .filters
+                .get(filter_name)
+                .map(|f| StateStoreDataValue::Filter(f.value().clone()))),
+            StateStoreDataKey::UserAvatarUrl(user_id) => Ok(self
+                .user_avatar_url
+                .get(user_id.as_str())
+                .map(|u| StateStoreDataValue::UserAvatarUrl(u.value().clone()))),
+        }
+    }
+
+    async fn set_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+        value: StateStoreDataValue,
+    ) -> Result<()> {
+        match key {
+            StateStoreDataKey::SyncToken => {
+                *self.sync_token.write().unwrap() =
+                    Some(value.into_sync_token().expect("Session data not a sync token"))
+            }
+            StateStoreDataKey::Filter(filter_name) => {
+                self.filters.insert(
+                    filter_name.to_owned(),
+                    value.into_filter().expect("Session data not a filter"),
+                );
+            }
+            StateStoreDataKey::UserAvatarUrl(user_id) => {
+                self.filters.insert(
+                    user_id.to_string(),
+                    value.into_user_avatar_url().expect("Session data not a user avatar url"),
+                );
+            }
+        }
 
         Ok(())
     }
 
-    async fn get_filter(&self, filter_name: &str) -> Result<Option<String>> {
-        Ok(self.filters.get(filter_name).map(|f| f.to_string()))
-    }
+    async fn remove_kv_data(&self, key: StateStoreDataKey<'_>) -> Result<()> {
+        match key {
+            StateStoreDataKey::SyncToken => *self.sync_token.write().unwrap() = None,
+            StateStoreDataKey::Filter(filter_name) => {
+                self.filters.remove(filter_name);
+            }
+            StateStoreDataKey::UserAvatarUrl(user_id) => {
+                self.filters.remove(user_id.as_str());
+            }
+        }
 
-    async fn get_sync_token(&self) -> Result<Option<String>> {
-        Ok(self.sync_token.read().unwrap().clone())
+        Ok(())
     }
 
     async fn save_changes(&self, changes: &StateChanges) -> Result<()> {
@@ -317,18 +372,21 @@ impl MemoryStore {
             for (event_id, receipts) in &content.0 {
                 for (receipt_type, receipts) in receipts {
                     for (user_id, receipt) in receipts {
+                        let thread = receipt.thread.as_str().map(ToOwned::to_owned);
                         // Add the receipt to the room user receipts
                         if let Some((old_event, _)) = self
                             .room_user_receipts
                             .entry(room.clone())
                             .or_default()
-                            .entry(receipt_type.to_string())
+                            .entry((receipt_type.to_string(), thread.clone()))
                             .or_default()
                             .insert(user_id.clone(), (event_id.clone(), receipt.clone()))
                         {
                             // Remove the old receipt from the room event receipts
                             if let Some(receipt_map) = self.room_event_receipts.get(room) {
-                                if let Some(event_map) = receipt_map.get(receipt_type.as_ref()) {
+                                if let Some(event_map) =
+                                    receipt_map.get(&(receipt_type.to_string(), thread.clone()))
+                                {
                                     if let Some(user_map) = event_map.get_mut(&old_event) {
                                         user_map.remove(user_id);
                                     }
@@ -340,7 +398,7 @@ impl MemoryStore {
                         self.room_event_receipts
                             .entry(room.clone())
                             .or_default()
-                            .entry(receipt_type.to_string())
+                            .entry((receipt_type.to_string(), thread))
                             .or_default()
                             .entry(event_id.clone())
                             .or_default()
@@ -509,10 +567,12 @@ impl MemoryStore {
         &self,
         room_id: &RoomId,
         receipt_type: ReceiptType,
+        thread: ReceiptThread,
         user_id: &UserId,
     ) -> Result<Option<(OwnedEventId, Receipt)>> {
         Ok(self.room_user_receipts.get(room_id).and_then(|m| {
-            m.get(receipt_type.as_ref()).and_then(|m| m.get(user_id).map(|r| r.clone()))
+            m.get(&(receipt_type.to_string(), thread.as_str().map(ToOwned::to_owned)))
+                .and_then(|m| m.get(user_id).map(|r| r.clone()))
         }))
     }
 
@@ -520,16 +580,20 @@ impl MemoryStore {
         &self,
         room_id: &RoomId,
         receipt_type: ReceiptType,
+        thread: ReceiptThread,
         event_id: &EventId,
     ) -> Result<Vec<(OwnedUserId, Receipt)>> {
         Ok(self
             .room_event_receipts
             .get(room_id)
             .and_then(|m| {
-                m.get(receipt_type.as_ref()).and_then(|m| {
-                    m.get(event_id)
-                        .map(|m| m.iter().map(|r| (r.key().clone(), r.value().clone())).collect())
-                })
+                m.get(&(receipt_type.to_string(), thread.as_str().map(ToOwned::to_owned))).and_then(
+                    |m| {
+                        m.get(event_id).map(|m| {
+                            m.iter().map(|r| (r.key().clone(), r.value().clone())).collect()
+                        })
+                    },
+                )
             })
             .unwrap_or_default())
     }
@@ -540,6 +604,10 @@ impl MemoryStore {
 
     async fn set_custom_value(&self, key: &[u8], value: Vec<u8>) -> Result<Option<Vec<u8>>> {
         Ok(self.custom.insert(key.to_vec(), value))
+    }
+
+    async fn remove_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.custom.remove(key).map(|entry| entry.1))
     }
 
     // The in-memory store doesn't cache media
@@ -578,20 +646,26 @@ impl MemoryStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl StateStore for MemoryStore {
-    async fn save_filter(&self, filter_name: &str, filter_id: &str) -> Result<()> {
-        self.save_filter(filter_name, filter_id).await
+    type Error = StoreError;
+
+    async fn get_kv_data(&self, key: StateStoreDataKey<'_>) -> Result<Option<StateStoreDataValue>> {
+        self.get_kv_data(key).await
+    }
+
+    async fn set_kv_data(
+        &self,
+        key: StateStoreDataKey<'_>,
+        value: StateStoreDataValue,
+    ) -> Result<()> {
+        self.set_kv_data(key, value).await
+    }
+
+    async fn remove_kv_data(&self, key: StateStoreDataKey<'_>) -> Result<()> {
+        self.remove_kv_data(key).await
     }
 
     async fn save_changes(&self, changes: &StateChanges) -> Result<()> {
         self.save_changes(changes).await
-    }
-
-    async fn get_filter(&self, filter_id: &str) -> Result<Option<String>> {
-        self.get_filter(filter_id).await
-    }
-
-    async fn get_sync_token(&self) -> Result<Option<String>> {
-        self.get_sync_token().await
     }
 
     async fn get_presence_event(&self, user_id: &UserId) -> Result<Option<Raw<PresenceEvent>>> {
@@ -690,18 +764,20 @@ impl StateStore for MemoryStore {
         &self,
         room_id: &RoomId,
         receipt_type: ReceiptType,
+        thread: ReceiptThread,
         user_id: &UserId,
     ) -> Result<Option<(OwnedEventId, Receipt)>> {
-        self.get_user_room_receipt_event(room_id, receipt_type, user_id).await
+        self.get_user_room_receipt_event(room_id, receipt_type, thread, user_id).await
     }
 
     async fn get_event_room_receipt_events(
         &self,
         room_id: &RoomId,
         receipt_type: ReceiptType,
+        thread: ReceiptThread,
         event_id: &EventId,
     ) -> Result<Vec<(OwnedUserId, Receipt)>> {
-        self.get_event_room_receipt_events(room_id, receipt_type, event_id).await
+        self.get_event_room_receipt_events(room_id, receipt_type, thread, event_id).await
     }
 
     async fn get_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
@@ -710,6 +786,10 @@ impl StateStore for MemoryStore {
 
     async fn set_custom_value(&self, key: &[u8], value: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.set_custom_value(key, value).await
+    }
+
+    async fn remove_custom_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.remove_custom_value(key).await
     }
 
     async fn add_media_content(&self, request: &MediaRequest, data: Vec<u8>) -> Result<()> {

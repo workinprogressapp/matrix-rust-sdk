@@ -16,51 +16,55 @@
 //!
 //! See [`Timeline`] for details.
 
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc, task::Poll};
 
+use eyeball_im::{VectorDiff, VectorSubscriber};
 use futures_core::Stream;
-use futures_signals::signal_vec::{SignalVec, SignalVecExt, VecDiff};
-#[cfg(feature = "experimental-sliding-sync")]
-use matrix_sdk_base::deserialized_responses::SyncTimelineEvent;
-use matrix_sdk_base::{deserialized_responses::EncryptionInfo, locks::Mutex};
+use im::Vector;
+use matrix_sdk_base::locks::Mutex;
+use pin_project_lite::pin_project;
 use ruma::{
+    api::client::receipt::create_receipt::v3::ReceiptType,
     assign,
-    events::{fully_read::FullyReadEventContent, AnyMessageLikeEventContent},
-    EventId, MilliSecondsSinceUnixEpoch, TransactionId,
+    events::{
+        receipt::{Receipt, ReceiptThread},
+        AnyMessageLikeEventContent,
+    },
+    EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, TransactionId, UserId,
 };
 use thiserror::Error;
 use tracing::{error, instrument, warn};
 
-use super::Joined;
+use super::{Joined, Receipts};
 use crate::{
     event_handler::EventHandlerHandle,
     room::{self, MessagesOptions},
-    Result,
+    Client, Result,
 };
 
+mod builder;
 mod event_handler;
 mod event_item;
 mod inner;
 mod pagination;
+mod read_receipts;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "e2e-encryption")]
 mod to_device;
 mod virtual_item;
 
+pub(crate) use self::builder::TimelineBuilder;
+use self::inner::{TimelineInner, TimelineInnerState};
 pub use self::{
     event_item::{
         AnyOtherFullStateEventContent, BundledReactions, EncryptedMessage, EventSendState,
-        EventTimelineItem, InReplyToDetails, MemberProfileChange, MembershipChange, Message,
-        OtherState, Profile, ReactionGroup, RepliedToEvent, RoomMembershipChange, Sticker,
-        TimelineDetails, TimelineItemContent,
+        EventTimelineItem, InReplyToDetails, LocalEventTimelineItem, MemberProfileChange,
+        MembershipChange, Message, OtherState, Profile, ReactionGroup, RemoteEventTimelineItem,
+        RepliedToEvent, RoomMembershipChange, Sticker, TimelineDetails, TimelineItemContent,
     },
     pagination::{PaginationOptions, PaginationOutcome},
     virtual_item::VirtualTimelineItem,
-};
-use self::{
-    inner::{TimelineInner, TimelineInnerMetadata},
-    to_device::{handle_forwarded_room_key_event, handle_room_key_event},
 };
 
 /// A high-level view into a regular¹ room's contents.
@@ -73,117 +77,16 @@ pub struct Timeline {
     inner: Arc<TimelineInner<room::Common>>,
     start_token: Mutex<Option<String>>,
     _end_token: Mutex<Option<String>>,
-    event_handler_handles: Vec<EventHandlerHandle>,
-}
-
-impl Drop for Timeline {
-    fn drop(&mut self) {
-        for handle in self.event_handler_handles.drain(..) {
-            self.inner.room().client().remove_event_handler(handle);
-        }
-    }
+    event_handler_handles: Arc<TimelineEventHandlerHandles>,
 }
 
 impl Timeline {
-    pub(super) fn new(room: &room::Common) -> Self {
-        Self::from_inner(Arc::new(TimelineInner::new(room.to_owned())), None)
-    }
-
-    #[cfg(feature = "experimental-sliding-sync")]
-    pub(crate) async fn with_events(
-        room: &room::Common,
-        prev_token: Option<String>,
-        events: Vec<SyncTimelineEvent>,
-    ) -> Self {
-        let mut inner = TimelineInner::new(room.to_owned());
-        inner.add_initial_events(events).await;
-
-        let timeline = Self::from_inner(Arc::new(inner), prev_token);
-
-        // The events we're injecting might be encrypted events, but we might
-        // have received the room key to decrypt them while nobody was listening to the
-        // `m.room_key` event, let's retry now.
-        //
-        // TODO: We could spawn a task here and put this into the background, though it
-        // might not be worth it depending on the number of events we injected.
-        // Some measuring needs to be done.
-        #[cfg(feature = "e2e-encryption")]
-        timeline.retry_decryption_for_all_events().await;
-
-        timeline
-    }
-
-    fn from_inner(inner: Arc<TimelineInner>, prev_token: Option<String>) -> Timeline {
-        let room = inner.room();
-
-        let timeline_event_handle = room.add_event_handler({
-            let inner = inner.clone();
-            move |event, encryption_info: Option<EncryptionInfo>| {
-                let inner = inner.clone();
-                async move {
-                    inner.handle_live_event(event, encryption_info).await;
-                }
-            }
-        });
-
-        // Not using room.add_event_handler here because RoomKey events are
-        // to-device events that are not received in the context of a room.
-        #[cfg(feature = "e2e-encryption")]
-        let room_key_handle = room
-            .client
-            .add_event_handler(handle_room_key_event(inner.clone(), room.room_id().to_owned()));
-        #[cfg(feature = "e2e-encryption")]
-        let forwarded_room_key_handle = room.client.add_event_handler(
-            handle_forwarded_room_key_event(inner.clone(), room.room_id().to_owned()),
-        );
-
-        let event_handler_handles = vec![
-            timeline_event_handle,
-            #[cfg(feature = "e2e-encryption")]
-            room_key_handle,
-            #[cfg(feature = "e2e-encryption")]
-            forwarded_room_key_handle,
-        ];
-
-        Timeline {
-            inner,
-            start_token: Mutex::new(prev_token),
-            _end_token: Mutex::new(None),
-            event_handler_handles,
-        }
+    pub(crate) fn builder(room: &room::Common) -> TimelineBuilder {
+        TimelineBuilder::new(room)
     }
 
     fn room(&self) -> &room::Common {
         self.inner.room()
-    }
-
-    /// Enable tracking of the fully-read marker on this `Timeline`.
-    pub async fn with_fully_read_tracking(mut self) -> Self {
-        match self.room().account_data_static::<FullyReadEventContent>().await {
-            Ok(Some(fully_read)) => match fully_read.deserialize() {
-                Ok(fully_read) => {
-                    self.inner.set_fully_read_event(fully_read.content.event_id).await;
-                }
-                Err(e) => {
-                    error!("Failed to deserialize fully-read account data: {e}");
-                }
-            },
-            Err(e) => {
-                error!("Failed to get fully-read account data from the store: {e}");
-            }
-            _ => {}
-        }
-
-        let inner = self.inner.clone();
-        let fully_read_handle = self.room().add_event_handler(move |event| {
-            let inner = inner.clone();
-            async move {
-                inner.handle_fully_read(event).await;
-            }
-        });
-        self.event_handler_handles.push(fully_read_handle);
-
-        self
     }
 
     /// Clear all timeline items, and reset pagination parameters.
@@ -199,25 +102,17 @@ impl Timeline {
     }
 
     /// Add more events to the start of the timeline.
-    ///
-    /// # Arguments
-    ///
-    /// * `initial_pagination_size`: The number of events to fetch from the
-    ///   server in the first pagination request. The server may choose return
-    ///   fewer events, for example because the supplied number is too big or
-    ///   the beginning of the visible timeline was reached.
-    /// * `
     #[instrument(skip_all, fields(initial_pagination_size, room_id = ?self.room().room_id()))]
     pub async fn paginate_backwards(&self, mut opts: PaginationOptions<'_>) -> Result<()> {
         let mut start_lock = self.start_token.lock().await;
         if start_lock.is_none()
-            && self.inner.items().first().map_or(false, |item| item.is_timeline_start())
+            && self.inner.items().await.front().map_or(false, |item| item.is_timeline_start())
         {
             warn!("Start of timeline reached, ignoring backwards-pagination request");
             return Ok(());
         }
 
-        self.inner.add_loading_indicator();
+        self.inner.add_loading_indicator().await;
 
         let mut from = start_lock.clone();
         let mut outcome = PaginationOutcome::new();
@@ -265,7 +160,7 @@ impl Timeline {
             }
         }
 
-        self.inner.remove_loading_indicator(from.is_some());
+        self.inner.remove_loading_indicator(from.is_some()).await;
         *start_lock = from;
 
         Ok(())
@@ -311,7 +206,7 @@ impl Timeline {
             .await;
     }
 
-    #[cfg(all(feature = "experimental-sliding-sync", feature = "e2e-encryption"))]
+    #[cfg(feature = "e2e-encryption")]
     async fn retry_decryption_for_all_events(&self) {
         self.inner
             .retry_event_decryption(
@@ -322,27 +217,27 @@ impl Timeline {
             .await;
     }
 
+    /// Get the current list of timeline items. Do not use this in production!
+    #[cfg(feature = "testing")]
+    pub async fn items(&self) -> Vector<Arc<TimelineItem>> {
+        self.inner.items().await
+    }
+
     /// Get the latest of the timeline's event items.
-    pub fn latest_event(&self) -> Option<EventTimelineItem> {
-        self.inner.items().last()?.as_event().cloned()
+    pub async fn latest_event(&self) -> Option<EventTimelineItem> {
+        self.inner.items().await.last()?.as_event().cloned()
     }
 
-    /// Get a signal of the timeline's items.
+    /// Get the current timeline items, and a stream of changes.
     ///
-    /// You can poll this signal to receive updates, the first of which will
-    /// be the full list of items currently available.
-    ///
-    /// See [`SignalVecExt`](futures_signals::signal_vec::SignalVecExt) for a
-    /// high-level API on top of [`SignalVec`].
-    pub fn signal(&self) -> impl SignalVec<Item = Arc<TimelineItem>> {
-        self.inner.items_signal()
-    }
-
-    /// Get a stream of timeline changes.
-    ///
-    /// This is a convenience shorthand for `timeline.signal().to_stream()`.
-    pub fn stream(&self) -> impl Stream<Item = VecDiff<Arc<TimelineItem>>> {
-        self.signal().to_stream()
+    /// You can poll this stream to receive updates. See
+    /// [`futures_util::StreamExt`] for a high-level API on top of [`Stream`].
+    pub async fn subscribe(
+        &self,
+    ) -> (Vector<Arc<TimelineItem>>, impl Stream<Item = VectorDiff<Arc<TimelineItem>>>) {
+        let (items, stream) = self.inner.subscribe().await;
+        let stream = TimelineStream::new(stream, self.event_handler_handles.clone());
+        (items, stream)
     }
 
     /// Send a message to the room, and add it to the timeline as a local echo.
@@ -374,7 +269,7 @@ impl Timeline {
     ///
     /// [`MessageLikeUnsigned`]: ruma::events::MessageLikeUnsigned
     /// [`SyncMessageLikeEvent`]: ruma::events::SyncMessageLikeEvent
-    #[instrument(skip(self, content), fields(room_id = ?self.room().room_id()))]
+    #[instrument(skip(self, content), parent = &self.inner.room().client.inner.root_span, fields(room_id = ?self.room().room_id()))]
     pub async fn send(&self, content: AnyMessageLikeEventContent, txn_id: Option<&TransactionId>) {
         let txn_id = txn_id.map_or_else(TransactionId::new, ToOwned::to_owned);
         self.inner.handle_local_event(txn_id.clone(), content.clone()).await;
@@ -389,7 +284,7 @@ impl Timeline {
             Ok(response) => EventSendState::Sent { event_id: response.event_id },
             Err(error) => EventSendState::SendingFailed { error: Arc::new(error) },
         };
-        self.inner.update_event_send_state(&txn_id, send_state);
+        self.inner.update_event_send_state(&txn_id, send_state).await;
     }
 
     /// Fetch unavailable details about the event with the given ID.
@@ -413,12 +308,7 @@ impl Timeline {
     /// before all requests are handled.
     #[instrument(skip(self), fields(room_id = ?self.room().room_id()))]
     pub async fn fetch_event_details(&self, event_id: &EventId) -> Result<()> {
-        let (index, item) = rfind_event_by_id(&self.inner.items(), event_id)
-            .and_then(|(pos, item)| item.as_remote().map(|item| (pos, item.clone())))
-            .ok_or(Error::RemoteEventNotInTimeline)?;
-
-        self.inner.fetch_in_reply_to_details(index, item).await?;
-
+        self.inner.fetch_in_reply_to_details(event_id).await?;
         Ok(())
     }
 
@@ -431,15 +321,146 @@ impl Timeline {
     /// the `sender_profile` set to [`TimelineDetails::Error`].
     #[instrument(skip_all)]
     pub async fn fetch_members(&self) {
-        self.inner.set_sender_profiles_pending();
+        self.inner.set_sender_profiles_pending().await;
         match self.room().ensure_members().await {
             Ok(_) => {
                 self.inner.update_sender_profiles().await;
             }
             Err(e) => {
-                self.inner.set_sender_profiles_error(Arc::new(e));
+                self.inner.set_sender_profiles_error(Arc::new(e)).await;
             }
         }
+    }
+
+    /// Get the latest read receipt for the given user.
+    ///
+    /// Contrary to [`Common::user_receipt()`](super::Common::user_receipt) that
+    /// only keeps track of read receipts received from the homeserver, this
+    /// keeps also track of implicit read receipts in this timeline, i.e.
+    /// when a room member sends an event.
+    #[instrument(skip(self), parent = &self.room().client.inner.root_span)]
+    pub async fn latest_user_read_receipt(
+        &self,
+        user_id: &UserId,
+    ) -> Option<(OwnedEventId, Receipt)> {
+        self.inner.latest_user_read_receipt(user_id).await
+    }
+
+    /// Send the given receipt.
+    ///
+    /// This uses [`Joined::send_single_receipt`] internally, but checks
+    /// first if the receipt points to an event in this timeline that is more
+    /// recent than the current ones, to avoid unnecessary requests.
+    #[instrument(skip(self), parent = &self.room().client.inner.root_span)]
+    pub async fn send_single_receipt(
+        &self,
+        receipt_type: ReceiptType,
+        thread: ReceiptThread,
+        event_id: OwnedEventId,
+    ) -> Result<()> {
+        if !self.inner.should_send_receipt(&receipt_type, &thread, &event_id).await {
+            return Ok(());
+        }
+
+        // If this room isn't actually in joined state, we'll get a server error.
+        // Not ideal, but works for now.
+        let room = Joined { inner: self.room().clone() };
+
+        room.send_single_receipt(receipt_type, thread, event_id).await
+    }
+
+    /// Send the given receipts.
+    ///
+    /// This uses [`Joined::send_multiple_receipts`] internally, but checks
+    /// first if the receipts point to events in this timeline that are more
+    /// recent than the current ones, to avoid unnecessary requests.
+    #[instrument(skip(self), parent = &self.room().client.inner.root_span)]
+    pub async fn send_multiple_receipts(&self, mut receipts: Receipts) -> Result<()> {
+        if let Some(fully_read) = &receipts.fully_read {
+            if !self
+                .inner
+                .should_send_receipt(
+                    &ReceiptType::FullyRead,
+                    &ReceiptThread::Unthreaded,
+                    fully_read,
+                )
+                .await
+            {
+                receipts.fully_read = None;
+            }
+        }
+
+        if let Some(read_receipt) = &receipts.read_receipt {
+            if !self
+                .inner
+                .should_send_receipt(&ReceiptType::Read, &ReceiptThread::Unthreaded, read_receipt)
+                .await
+            {
+                receipts.read_receipt = None;
+            }
+        }
+
+        if let Some(private_read_receipt) = &receipts.private_read_receipt {
+            if !self
+                .inner
+                .should_send_receipt(
+                    &ReceiptType::ReadPrivate,
+                    &ReceiptThread::Unthreaded,
+                    private_read_receipt,
+                )
+                .await
+            {
+                receipts.private_read_receipt = None;
+            }
+        }
+
+        // If this room isn't actually in joined state, we'll get a server error.
+        // Not ideal, but works for now.
+        let room = Joined { inner: self.room().clone() };
+
+        room.send_multiple_receipts(receipts).await
+    }
+}
+
+#[derive(Debug)]
+struct TimelineEventHandlerHandles {
+    client: Client,
+    handles: Vec<EventHandlerHandle>,
+}
+
+impl Drop for TimelineEventHandlerHandles {
+    fn drop(&mut self) {
+        for handle in self.handles.drain(..) {
+            self.client.remove_event_handler(handle);
+        }
+    }
+}
+
+pin_project! {
+    struct TimelineStream {
+        #[pin]
+        inner: VectorSubscriber<Arc<TimelineItem>>,
+        event_handler_handles: Arc<TimelineEventHandlerHandles>,
+    }
+}
+
+impl TimelineStream {
+    fn new(
+        inner: VectorSubscriber<Arc<TimelineItem>>,
+        event_handler_handles: Arc<TimelineEventHandlerHandles>,
+    ) -> Self {
+        Self { inner, event_handler_handles }
+    }
+}
+
+impl Stream for TimelineStream {
+    type Item = VectorDiff<Arc<TimelineItem>>;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
     }
 }
 
@@ -489,6 +510,14 @@ impl TimelineItem {
         Self::Virtual(VirtualTimelineItem::TimelineStart)
     }
 
+    fn is_virtual(&self) -> bool {
+        matches!(self, Self::Virtual(_))
+    }
+
+    fn is_day_divider(&self) -> bool {
+        matches!(self, Self::Virtual(VirtualTimelineItem::DayDivider(_)))
+    }
+
     fn is_read_marker(&self) -> bool {
         matches!(self, Self::Virtual(VirtualTimelineItem::ReadMarker))
     }
@@ -502,10 +531,22 @@ impl TimelineItem {
     }
 }
 
+impl From<EventTimelineItem> for TimelineItem {
+    fn from(item: EventTimelineItem) -> Self {
+        Self::Event(item)
+    }
+}
+
+impl From<VirtualTimelineItem> for TimelineItem {
+    fn from(item: VirtualTimelineItem) -> Self {
+        Self::Virtual(item)
+    }
+}
+
 // FIXME: Put an upper bound on timeline size or add a separate map to look up
 // the index of a timeline item by its key, to avoid large linear scans.
 fn rfind_event_item(
-    items: &[Arc<TimelineItem>],
+    items: &Vector<Arc<TimelineItem>>,
     mut f: impl FnMut(&EventTimelineItem) -> bool,
 ) -> Option<(usize, &EventTimelineItem)> {
     items
@@ -516,13 +557,13 @@ fn rfind_event_item(
 }
 
 fn rfind_event_by_id<'a>(
-    items: &'a [Arc<TimelineItem>],
+    items: &'a Vector<Arc<TimelineItem>>,
     event_id: &EventId,
 ) -> Option<(usize, &'a EventTimelineItem)> {
     rfind_event_item(items, |it| it.event_id() == Some(event_id))
 }
 
-fn find_read_marker(items: &[Arc<TimelineItem>]) -> Option<usize> {
+fn find_read_marker(items: &Vector<Arc<TimelineItem>>) -> Option<usize> {
     items.iter().rposition(|item| item.is_read_marker())
 }
 
@@ -537,4 +578,34 @@ pub enum Error {
     /// The event is currently unsupported for this use case.
     #[error("Unsupported event")]
     UnsupportedEvent,
+}
+
+/// Result of comparing events position in the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelativePosition {
+    /// Event B is after (more recent than) event A.
+    After,
+    /// They are the same event.
+    Same,
+    /// Event B is before (older than) event A.
+    Before,
+}
+
+fn compare_events_positions(
+    event_a: &EventId,
+    event_b: &EventId,
+    timeline_items: &Vector<Arc<TimelineItem>>,
+) -> Option<RelativePosition> {
+    if event_a == event_b {
+        return Some(RelativePosition::Same);
+    }
+
+    let (pos_event_a, _) = rfind_event_by_id(timeline_items, event_a)?;
+    let (pos_event_b, _) = rfind_event_by_id(timeline_items, event_b)?;
+
+    if pos_event_a > pos_event_b {
+        Some(RelativePosition::Before)
+    } else {
+        Some(RelativePosition::After)
+    }
 }

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
 use futures::StreamExt;
-use futures_signals::signal_vec::SignalVecExt;
 use matrix_sdk::{self, config::SyncSettings, ruma::OwnedRoomId, Client};
 use url::Url;
 
@@ -33,8 +32,10 @@ struct Cli {
 }
 
 async fn login(cli: Cli) -> Result<Client> {
-    let mut builder =
-        Client::builder().homeserver_url(cli.homeserver).sled_store("./", Some("some password"));
+    // Note that when encryption is enabled, you should use a persistent store to be
+    // able to restore the session with a working encryption setup.
+    // See the `persist_session` example.
+    let mut builder = Client::builder().homeserver_url(cli.homeserver);
 
     if let Some(proxy) = cli.proxy {
         builder = builder.proxy(proxy);
@@ -68,11 +69,12 @@ async fn main() -> Result<()> {
     // Get the timeline stream and listen to it.
     let room = client.get_room(&room_id).unwrap();
     let timeline = room.timeline().await;
-    let mut timeline_stream = timeline.signal().to_stream();
+    let (timeline_items, mut timeline_stream) = timeline.subscribe().await;
 
+    println!("Initial timeline items: {timeline_items:#?}");
     tokio::spawn(async move {
         while let Some(diff) = timeline_stream.next().await {
-            println!("Received a timeline diff {diff:#?}");
+            println!("Received a timeline diff: {diff:#?}");
         }
     });
 

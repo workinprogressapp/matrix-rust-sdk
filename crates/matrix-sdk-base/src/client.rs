@@ -21,11 +21,11 @@ use std::{
 #[cfg(feature = "e2e-encryption")]
 use std::{ops::Deref, sync::Arc};
 
-use futures_signals::signal::ReadOnlyMutable;
+use eyeball::Subscriber;
 use matrix_sdk_common::{instant::Instant, locks::RwLock};
 #[cfg(feature = "e2e-encryption")]
 use matrix_sdk_crypto::{
-    store::CryptoStore, EncryptionSettings, OlmError, OlmMachine, ToDeviceRequest,
+    store::DynCryptoStore, EncryptionSettings, OlmError, OlmMachine, ToDeviceRequest,
 };
 #[cfg(feature = "e2e-encryption")]
 use once_cell::sync::OnceCell;
@@ -60,13 +60,13 @@ use crate::error::Error;
 use crate::{
     deserialized_responses::{AmbiguityChanges, MembersResponse, SyncTimelineEvent},
     error::Result,
-    rooms::{Room, RoomInfo, RoomType},
+    rooms::{Room, RoomInfo, RoomState},
     store::{
-        ambiguity_map::AmbiguityCache, Result as StoreResult, StateChanges, StateStoreExt, Store,
-        StoreConfig,
+        ambiguity_map::AmbiguityCache, DynStateStore, Result as StoreResult, StateChanges,
+        StateStoreDataKey, StateStoreDataValue, StateStoreExt, Store, StoreConfig,
     },
     sync::{JoinedRoom, LeftRoom, Rooms, SyncResponse, Timeline},
-    Session, SessionMeta, SessionTokens, StateStore,
+    Session, SessionMeta, SessionTokens,
 };
 
 /// A no IO Client implementation.
@@ -82,7 +82,7 @@ pub struct BaseClient {
     /// This field is only meant to be used for `OlmMachine` initialization.
     /// All operations on it happen inside the `OlmMachine`.
     #[cfg(feature = "e2e-encryption")]
-    crypto_store: Arc<dyn CryptoStore>,
+    crypto_store: Arc<DynCryptoStore>,
     /// The olm-machine that is created once the
     /// [`SessionMeta`][crate::session::SessionMeta] is set via
     /// [`BaseClient::set_session_meta`]
@@ -133,10 +133,14 @@ impl BaseClient {
 
     /// Get the session tokens.
     ///
-    /// If the client is currently logged in, this will return a
+    /// This returns a subscriber object that you can use both to
+    /// [`get`](Subscriber::get) the current value as well as to react to
+    /// changes to the tokens.
+    ///
+    /// If the client is currently logged in, the inner value is a
     /// [`SessionTokens`] object which contains the access token and optional
-    /// refresh token. Otherwise it returns `None`.
-    pub fn session_tokens(&self) -> ReadOnlyMutable<Option<SessionTokens>> {
+    /// refresh token. Otherwise it is `None`.
+    pub fn session_tokens(&self) -> Subscriber<Option<SessionTokens>> {
         self.store.session_tokens()
     }
 
@@ -163,8 +167,8 @@ impl BaseClient {
 
     /// Lookup the Room for the given RoomId, or create one, if it didn't exist
     /// yet in the store
-    pub async fn get_or_create_room(&self, room_id: &RoomId, room_type: RoomType) -> Room {
-        self.store.get_or_create_room(room_id, room_type).await
+    pub async fn get_or_create_room(&self, room_id: &RoomId, room_state: RoomState) -> Room {
+        self.store.get_or_create_room(room_id, room_state).await
     }
 
     /// Get all the rooms this client knows about.
@@ -174,7 +178,7 @@ impl BaseClient {
 
     /// Get a reference to the store.
     #[allow(unknown_lints, clippy::explicit_auto_deref)]
-    pub fn store(&self) -> &dyn StateStore {
+    pub fn store(&self) -> &DynStateStore {
         &*self.store
     }
 
@@ -407,7 +411,7 @@ impl BaseClient {
                     if let Some(context) = &push_context {
                         let actions = push_rules.get_actions(&event.event, context);
 
-                        if actions.iter().any(|a| matches!(a, Action::Notify)) {
+                        if actions.iter().any(Action::should_notify) {
                             changes.add_notification(
                                 room_id,
                                 Notification::new(
@@ -419,14 +423,7 @@ impl BaseClient {
                                 ),
                             );
                         }
-                        // TODO if there is an
-                        // Action::SetTweak(Tweak::Highlight) we need to store
-                        // its value with the event so a client can show if the
-                        // event is highlighted
-                        // in the UI.
-                        // Requires the possibility to associate custom data
-                        // with events and to
-                        // store them.
+                        event.push_actions = actions.to_owned();
                     }
                 }
                 Err(e) => {
@@ -619,8 +616,8 @@ impl BaseClient {
     ///
     /// Update the internal and cached state accordingly. Return the final Room.
     pub async fn room_joined(&self, room_id: &RoomId) -> Result<Room> {
-        let room = self.store.get_or_create_room(room_id, RoomType::Joined).await;
-        if room.room_type() != RoomType::Joined {
+        let room = self.store.get_or_create_room(room_id, RoomState::Joined).await;
+        if room.state() != RoomState::Joined {
             let _sync_lock = self.sync_lock().read().await;
 
             let mut room_info = room.clone_info();
@@ -640,8 +637,8 @@ impl BaseClient {
     ///
     /// Update the internal and cached state accordingly. Return the final Room.
     pub async fn room_left(&self, room_id: &RoomId) -> Result<Room> {
-        let room = self.store.get_or_create_room(room_id, RoomType::Left).await;
-        if room.room_type() != RoomType::Left {
+        let room = self.store.get_or_create_room(room_id, RoomState::Left).await;
+        if room.state() != RoomState::Left {
             let _sync_lock = self.sync_lock().read().await;
 
             let mut room_info = room.clone_info();
@@ -714,7 +711,7 @@ impl BaseClient {
         let mut new_rooms = Rooms::default();
 
         for (room_id, new_info) in rooms.join {
-            let room = self.store.get_or_create_room(&room_id, RoomType::Joined).await;
+            let room = self.store.get_or_create_room(&room_id, RoomState::Joined).await;
             let mut room_info = room.clone_info();
             room_info.mark_as_joined();
 
@@ -798,7 +795,7 @@ impl BaseClient {
         }
 
         for (room_id, new_info) in rooms.leave {
-            let room = self.store.get_or_create_room(&room_id, RoomType::Left).await;
+            let room = self.store.get_or_create_room(&room_id, RoomState::Left).await;
             let mut room_info = room.clone_info();
             room_info.mark_as_left();
             room_info.mark_state_partially_synced();
@@ -1024,7 +1021,13 @@ impl BaseClient {
         filter_name: &str,
         response: &api::filter::create_filter::v3::Response,
     ) -> Result<()> {
-        Ok(self.store.save_filter(filter_name, &response.filter_id).await?)
+        Ok(self
+            .store
+            .set_kv_data(
+                StateStoreDataKey::Filter(filter_name),
+                StateStoreDataValue::Filter(response.filter_id.clone()),
+            )
+            .await?)
     }
 
     /// Get the filter id of a previously uploaded filter.
@@ -1039,7 +1042,13 @@ impl BaseClient {
     ///
     /// [`receive_filter_upload`]: #method.receive_filter_upload
     pub async fn get_filter(&self, filter_name: &str) -> StoreResult<Option<String>> {
-        self.store.get_filter(filter_name).await
+        let filter = self
+            .store
+            .get_kv_data(StateStoreDataKey::Filter(filter_name))
+            .await?
+            .map(|d| d.into_filter().expect("State store data not a filter"));
+
+        Ok(filter)
     }
 
     /// Get a to-device request that will share a room key with users in a room.
@@ -1238,7 +1247,7 @@ mod tests {
     use serde_json::json;
 
     use super::BaseClient;
-    use crate::{DisplayName, RoomType, SessionMeta};
+    use crate::{DisplayName, RoomState, SessionMeta};
 
     #[async_test]
     async fn invite_after_leaving() {
@@ -1272,7 +1281,7 @@ mod tests {
             ))
             .build_sync_response();
         client.receive_sync_response(response).await.unwrap();
-        assert_eq!(client.get_room(room_id).unwrap().room_type(), RoomType::Left);
+        assert_eq!(client.get_room(room_id).unwrap().state(), RoomState::Left);
 
         let response = ev_builder
             .add_invited_room(InvitedRoomBuilder::new(room_id).add_state_event(
@@ -1290,7 +1299,7 @@ mod tests {
             ))
             .build_sync_response();
         client.receive_sync_response(response).await.unwrap();
-        assert_eq!(client.get_room(room_id).unwrap().room_type(), RoomType::Invited);
+        assert_eq!(client.get_room(room_id).unwrap().state(), RoomState::Invited);
     }
 
     #[async_test]
@@ -1381,7 +1390,7 @@ mod tests {
         client.receive_sync_response(response).await.unwrap();
 
         let room = client.get_room(room_id).expect("Room not found");
-        assert_eq!(room.room_type(), RoomType::Invited);
+        assert_eq!(room.state(), RoomState::Invited);
         assert_eq!(
             room.display_name().await.expect("fetching display name failed"),
             DisplayName::Calculated("Kyra".to_owned())

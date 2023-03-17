@@ -4,6 +4,7 @@ use matrix_sdk_crypto::{
     store::CryptoStoreError as InnerStoreError, KeyExportError, MegolmError, OlmError,
     SecretImportError as RustSecretImportError, SignatureError as InnerSignatureError,
 };
+use matrix_sdk_sqlite::OpenStoreError;
 use ruma::{IdParseError, OwnedUserId};
 
 #[derive(Debug, thiserror::Error)]
@@ -38,9 +39,10 @@ pub enum SignatureError {
     UnknownUserIdentity(String),
 }
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[uniffi(flat_error)]
+#[derive(Debug, thiserror::Error)]
 pub enum CryptoStoreError {
+    #[error("Failed to open the store")]
+    OpenStore(#[from] OpenStoreError),
     #[error(transparent)]
     CryptoStore(#[from] InnerStoreError),
     #[error(transparent)]

@@ -46,15 +46,15 @@ impl Details {
     }
 
     pub fn refresh_data(&mut self) {
-        let Some(room_id) = self.sstate.selected_room.lock_ref().clone() else { return };
+        let Some(room_id) = self.sstate.selected_room.get() else { return };
         let Some(room_data) = self.sstate.get_room(&room_id) else {
             return;
         };
 
-        let name = room_data.name.clone().unwrap_or_else(|| "unknown".to_owned());
+        let name = room_data.name().unwrap_or("unknown").to_owned();
 
         let state_events = room_data
-            .required_state
+            .required_state()
             .iter()
             .filter_map(|r| r.deserialize().ok())
             .fold(BTreeMap::<String, Vec<_>>::new(), |mut b, r| {
@@ -72,7 +72,8 @@ impl Details {
         let timeline: Vec<String> = self
             .sstate
             .current_timeline
-            .lock_ref()
+            .read()
+            .unwrap()
             .iter()
             .filter_map(|t| t.as_event()) // we ignore virtual events
             .map(|e| match e.content() {

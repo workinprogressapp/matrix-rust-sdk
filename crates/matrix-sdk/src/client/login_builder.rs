@@ -22,6 +22,7 @@ use std::{
 use ruma::{
     api::client::{session::login, uiaa::UserIdentifier},
     assign,
+    serde::JsonObject,
 };
 use tracing::{info, instrument};
 
@@ -35,16 +36,20 @@ use crate::{config::RequestConfig, Result};
 /// [the spec]: https://spec.matrix.org/v1.3/client-server-api/#post_matrixclientv3login
 enum LoginMethod {
     /// Login type `m.login.password`
-    UserPassword { id: UserIdentifier, password: String },
+    UserPassword {
+        id: UserIdentifier,
+        password: String,
+    },
     /// Login type `m.token`
     Token(String),
+    Custom(login::v3::LoginInfo),
 }
 
 impl LoginMethod {
     fn id(&self) -> Option<&UserIdentifier> {
         match self {
             LoginMethod::UserPassword { id, .. } => Some(id),
-            LoginMethod::Token(_) => None,
+            LoginMethod::Token(_) | LoginMethod::Custom(_) => None,
         }
     }
 
@@ -52,6 +57,7 @@ impl LoginMethod {
         match self {
             LoginMethod::UserPassword { .. } => "identifier and password",
             LoginMethod::Token(_) => "token",
+            LoginMethod::Custom(_) => "custom",
         }
     }
 
@@ -61,6 +67,7 @@ impl LoginMethod {
                 login::v3::LoginInfo::Password(login::v3::Password::new(id, password))
             }
             LoginMethod::Token(token) => login::v3::LoginInfo::Token(login::v3::Token::new(token)),
+            LoginMethod::Custom(login_info) => login_info,
         }
     }
 }
@@ -96,6 +103,15 @@ impl LoginBuilder {
 
     pub(super) fn new_token(client: Client, token: String) -> Self {
         Self::new(client, LoginMethod::Token(token))
+    }
+
+    pub(super) fn new_custom(
+        client: Client,
+        login_type: &str,
+        data: JsonObject,
+    ) -> serde_json::Result<Self> {
+        let login_info = login::v3::LoginInfo::new(login_type, data)?;
+        Ok(Self::new(client, LoginMethod::Custom(login_info)))
     }
 
     /// Set the device ID.
@@ -142,6 +158,7 @@ impl LoginBuilder {
     /// Instead of calling this function and `.await`ing its return value, you
     /// can also `.await` the `LoginBuilder` directly.
     #[instrument(
+        parent = &self.client.inner.root_span,
         target = "matrix_sdk::client",
         name = "login",
         skip_all,
@@ -278,7 +295,13 @@ where
     ///
     /// Instead of calling this function and `.await`ing its return value, you
     /// can also `.await` the `SsoLoginBuilder` directly.
-    #[instrument(target = "matrix_sdk::client", name = "login", skip_all, fields(method = "sso"))]
+    #[instrument(
+        parent = &self.client.inner.root_span,
+        target = "matrix_sdk::client",
+        name = "login",
+        skip_all,
+        fields(method = "sso"),
+    )]
     pub async fn send(self) -> Result<login::v3::Response> {
         use std::{
             convert::Infallible,

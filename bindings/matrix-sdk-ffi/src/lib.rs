@@ -1,6 +1,6 @@
 // TODO: target-os conditional would be good.
 
-#![allow(unused_qualifications)]
+#![allow(unused_qualifications, clippy::new_without_default)]
 
 macro_rules! unwrap_or_clone_arc_into_variant {
     (
@@ -26,6 +26,7 @@ pub mod authentication_service;
 pub mod client;
 pub mod client_builder;
 mod helpers;
+pub mod notification_service;
 pub mod room;
 pub mod session_verification;
 pub mod sliding_sync;
@@ -34,6 +35,7 @@ mod uniffi_api;
 
 use client::Client;
 use client_builder::ClientBuilder;
+use matrix_sdk::{encryption::CryptoStoreError, HttpError, IdParseError};
 use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
 pub use uniffi_api::*;
@@ -47,17 +49,9 @@ pub use matrix_sdk::{
 };
 
 pub use self::{
-    authentication_service::*, client::*, room::*, session_verification::*, sliding_sync::*,
-    timeline::*,
+    authentication_service::*, client::*, notification_service::*, room::*,
+    session_verification::*, sliding_sync::*, timeline::*,
 };
-
-#[derive(Default, Debug)]
-pub struct ClientState {
-    has_first_synced: bool,
-    is_syncing: bool,
-    should_stop_syncing: bool,
-    is_soft_logout: bool,
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum ClientError {
@@ -71,6 +65,36 @@ impl From<anyhow::Error> for ClientError {
     }
 }
 
+impl From<matrix_sdk::Error> for ClientError {
+    fn from(e: matrix_sdk::Error) -> Self {
+        anyhow::Error::from(e).into()
+    }
+}
+
+impl From<CryptoStoreError> for ClientError {
+    fn from(e: CryptoStoreError) -> Self {
+        anyhow::Error::from(e).into()
+    }
+}
+
+impl From<HttpError> for ClientError {
+    fn from(e: HttpError) -> Self {
+        anyhow::Error::from(e).into()
+    }
+}
+
+impl From<IdParseError> for ClientError {
+    fn from(e: IdParseError) -> Self {
+        anyhow::Error::from(e).into()
+    }
+}
+
+impl From<serde_json::Error> for ClientError {
+    fn from(e: serde_json::Error) -> Self {
+        anyhow::Error::from(e).into()
+    }
+}
+
 pub use platform::*;
 
 mod uniffi_types {
@@ -80,23 +104,27 @@ mod uniffi_types {
         authentication_service::{
             AuthenticationError, AuthenticationService, HomeserverLoginDetails,
         },
-        client::Client,
+        client::{
+            Client, CreateRoomParameters, HttpPusherData, PushFormat, PusherIdentifiers,
+            PusherKind, Session,
+        },
         client_builder::ClientBuilder,
         room::{Membership, MembershipState, Room, RoomMember},
         session_verification::{SessionVerificationController, SessionVerificationEmoji},
         sliding_sync::{
-            RequiredState, RoomListEntry, SlidingSync, SlidingSyncBuilder,
-            SlidingSyncRequestListFilters, SlidingSyncRoom, SlidingSyncView,
-            SlidingSyncViewBuilder, StoppableSpawn, UnreadNotificationsCount,
+            RequiredState, RoomListEntry, SlidingSync, SlidingSyncBuilder, SlidingSyncList,
+            SlidingSyncListBuilder, SlidingSyncRequestListFilters, SlidingSyncRoom, TaskHandle,
+            UnreadNotificationsCount,
         },
         timeline::{
-            EmoteMessageContent, EncryptedMessage, EventSendState, EventTimelineItem, FileInfo,
-            FileMessageContent, FormattedBody, ImageInfo, ImageMessageContent, InsertAtData,
-            MembershipChange, Message, MessageFormat, MessageType, NoticeMessageContent,
-            OtherState, ProfileTimelineDetails, Reaction, TextMessageContent, ThumbnailInfo,
-            TimelineChange, TimelineDiff, TimelineItem, TimelineItemContent,
-            TimelineItemContentKind, UpdateAtData, VideoInfo, VideoMessageContent,
+            AudioInfo, AudioMessageContent, EmoteMessageContent, EncryptedMessage, EventSendState,
+            EventTimelineItem, FileInfo, FileMessageContent, FormattedBody, ImageInfo,
+            ImageMessageContent, InsertData, MembershipChange, Message, MessageFormat, MessageType,
+            NoticeMessageContent, OtherState, ProfileTimelineDetails, Reaction, SetData,
+            TextMessageContent, ThumbnailInfo, TimelineChange, TimelineDiff, TimelineItem,
+            TimelineItemContent, TimelineItemContentKind, VideoInfo, VideoMessageContent,
             VirtualTimelineItem,
         },
+        ClientError,
     };
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, sync::Arc};
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
@@ -20,11 +20,12 @@ use matrix_sdk_common::locks::Mutex;
 use ruma::{
     DeviceId, OwnedDeviceId, OwnedTransactionId, OwnedUserId, RoomId, TransactionId, UserId,
 };
+use tracing::warn;
 
 use super::{
     caches::{DeviceStore, GroupSessionStore, SessionStore},
-    BackupKeys, Changes, CryptoStore, InboundGroupSession, ReadOnlyAccount, Result, RoomKeyCounts,
-    Session,
+    BackupKeys, Changes, CryptoStore, InboundGroupSession, ReadOnlyAccount, RoomKeyCounts,
+    RoomSettings, Session,
 };
 use crate::{
     gossiping::{GossipRequest, SecretInfo},
@@ -99,9 +100,13 @@ impl MemoryStore {
     }
 }
 
+type Result<T> = std::result::Result<T, Infallible>;
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CryptoStore for MemoryStore {
+    type Error = Infallible;
+
     async fn load_account(&self) -> Result<Option<ReadOnlyAccount>> {
         Ok(None)
     }
@@ -266,6 +271,21 @@ impl CryptoStore for MemoryStore {
 
     async fn load_backup_keys(&self) -> Result<BackupKeys> {
         Ok(BackupKeys::default())
+    }
+
+    async fn get_room_settings(&self, _room_id: &RoomId) -> Result<Option<RoomSettings>> {
+        warn!("Method not implemented");
+        Ok(None)
+    }
+
+    async fn get_custom_value(&self, _key: &str) -> Result<Option<Vec<u8>>> {
+        warn!("Method not implemented");
+        Ok(None)
+    }
+
+    async fn set_custom_value(&self, _key: &str, _value: Vec<u8>) -> Result<()> {
+        warn!("Method not implemented");
+        Ok(())
     }
 }
 
