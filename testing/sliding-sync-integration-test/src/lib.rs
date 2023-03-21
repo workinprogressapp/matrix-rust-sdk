@@ -77,7 +77,7 @@ mod tests {
     use eyeball_im::VectorDiff;
     use futures::{pin_mut, stream::StreamExt};
     use matrix_sdk::{
-        room::timeline::EventTimelineItem,
+        room::timeline::{EventTimelineItem, PaginationOptions},
         ruma::{
             api::client::{
                 error::ErrorKind as RumaError,
@@ -1456,13 +1456,13 @@ mod tests {
             room_id
         };
 
-        // Join a room and send 5 messages.
+        // Join a room and send some messages.
         {
             // Join the room.
             let room =
                 client.get_joined_room(&room_id).context("Failed to join room `{room_id}`")?;
 
-            for nth in 0..5 {
+            for nth in 0..20 {
                 let message = RoomMessageEventContent::text_plain(format!("Message #{nth}"));
 
                 room.send(message, None).await?;
@@ -1481,7 +1481,7 @@ mod tests {
                     .sync_mode(SlidingSyncMode::Selective)
                     .name("visible_rooms_list")
                     .add_range(0u32, 1)
-                    .timeline_limit(1u32)
+                    .timeline_limit(0u32)
                     .build()?,
             )
             .build()
@@ -1491,53 +1491,33 @@ mod tests {
         let stream = sync.stream();
         pin_mut!(stream);
 
-        // Sync to receive a message with a `timeline_limit` set to 1.
-        let mut update_summary;
+        let list =
+            sync.list("visible_rooms_list").context("list `visible_rooms_list` wasn't found")?;
 
-        loop {
-            // Wait for a response.
-            update_summary = stream
-                .next()
-                .await
-                .context("No update summary found, loop ended unsuccessfully")??;
-
-            if !update_summary.rooms.is_empty() {
-                break;
-            }
+        {
+            stream.next().await.context("No update summary found, loop ended unsuccessfully")??;
         }
 
         info!("Synced, initializing timeline");
 
         let room = sync.get_room(&room_id).expect("Failed to get the room");
         let timeline = room.timeline().await.unwrap();
+        let _ = timeline.subscribe().await;
 
         // Send a new message
         {
             info!("Sending another message");
-            let message = RoomMessageEventContent::text_plain("Message #5");
+            let message = RoomMessageEventContent::text_plain("Latest message");
             timeline.send(message.into(), None).await;
         }
 
-        info!("Syncing again");
+        Observable::set(&mut list.timeline_limit.write().unwrap(), Some(uint!(20)));
 
-        // Fetch more message from sliding sync with a bigger limit
-        let list =
-            sync.list("visible_rooms_list").context("list `visible_rooms_list` isn't found")?;
-
-        Observable::set(&mut list.timeline_limit.write().unwrap(), Some(uint!(10)));
-
-        loop {
-            update_summary = stream
-                .next()
-                .await
-                .context("No update summary found, loop ended unsuccessfully")??;
-
-            if !update_summary.rooms.is_empty() {
-                break;
-            }
-        }
-
-        info!("Done syncing");
+        _ = tokio::join!(
+            timeline.clear(),
+            timeline.paginate_backwards(PaginationOptions::until_num_items(5, 5)),
+            stream.next()
+        );
 
         for item in timeline.items().await {
             if let Some(event_item) = item.as_event() {
@@ -1570,7 +1550,7 @@ mod tests {
         // Check that the last is the last one we sent
         let items = timeline.items().await;
         let last_item = items.last().unwrap().as_event().unwrap();
-        assert_eq!(last_item.content().as_message().unwrap().body(), "Message #5");
+        assert_eq!(last_item.content().as_message().unwrap().body(), "Latest message");
 
         Ok(())
     }
