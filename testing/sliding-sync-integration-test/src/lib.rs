@@ -77,7 +77,7 @@ mod tests {
     use eyeball_im::VectorDiff;
     use futures::{pin_mut, stream::StreamExt};
     use matrix_sdk::{
-        room::timeline::EventTimelineItem,
+        room::timeline::{EventTimelineItem, PaginationOptions},
         ruma::{
             api::client::{
                 error::ErrorKind as RumaError,
@@ -1406,6 +1406,157 @@ mod tests {
             }
         }
         assert!(found_receipt);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn newest_message_is_last() -> anyhow::Result<()> {
+        let (client, sync_builder) = random_setup_with_rooms(1).await?;
+
+        // List one room.
+        let room_id = {
+            let sync = sync_builder
+                .clone()
+                .add_list(
+                    SlidingSyncList::builder()
+                        .sync_mode(SlidingSyncMode::Selective)
+                        .add_range(0u32, 1)
+                        .timeline_limit(0u32)
+                        .name("init_list")
+                        .build()?,
+                )
+                .build()
+                .await?;
+
+            // Get the sync stream.
+            let stream = sync.stream();
+            pin_mut!(stream);
+
+            // Get the list to all rooms to check the list' state.
+            let list = sync.list("init_list").context("list `init_list` isn't found")?;
+
+            // Send the request and wait for a response.
+            let update_summary = stream
+                .next()
+                .await
+                .context("No room summary found, loop ended unsuccessfully")??;
+
+            // One room has received an update.
+            assert_eq!(update_summary.rooms.len(), 1);
+
+            // Let's fetch the room ID then.
+            let room_id = update_summary.rooms[0].clone();
+
+            // Let's fetch the room ID from the list too.
+            assert_matches!(list.rooms_list().get(0), Some(RoomListEntry::Filled(same_room_id)) => {
+                assert_eq!(same_room_id, &room_id);
+            });
+
+            room_id
+        };
+
+        // Join a room and send 20 messages.
+        {
+            // Join the room.
+            let room =
+                client.get_joined_room(&room_id).context("Failed to join room `{room_id}`")?;
+
+            // In this room, let's send 20 messages!
+            for nth in 0..20 {
+                let message = RoomMessageEventContent::text_plain(format!("Message #{nth}"));
+
+                room.send(message, None).await?;
+            }
+
+            // Wait on the server to receive all the messages.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        let sync = sync_builder
+            .clone()
+            .add_list(
+                SlidingSyncList::builder()
+                    .sync_mode(SlidingSyncMode::Selective)
+                    .name("visible_rooms_list")
+                    .add_range(0u32, 1)
+                    .timeline_limit(1u32)
+                    .build()?,
+            )
+            .build()
+            .await?;
+
+        // Get the sync stream.
+        let stream = sync.stream();
+        pin_mut!(stream);
+
+        // Sync to receive a message with a `timeline_limit` set to 1.
+        let mut update_summary;
+
+        loop {
+            // Wait for a response.
+            update_summary = stream
+                .next()
+                .await
+                .context("No update summary found, loop ended unsuccessfully")??;
+
+            if !update_summary.rooms.is_empty() {
+                break;
+            }
+        }
+
+        let room = sync.get_room(&room_id).expect("Failed to get the room");
+        let timeline = room.timeline().await.unwrap();
+
+        // Simulate a session reset
+        timeline.clear().await;
+
+        // Send a new message
+        {
+            let room =
+                client.get_joined_room(&room_id).context("Failed to join room `{room_id}`")?;
+
+            let message = RoomMessageEventContent::text_plain("Message #20");
+            room.send(message, None).await?;
+        }
+
+        // Backpaginate
+        _ = timeline.paginate_backwards(PaginationOptions::single_request(20)).await;
+
+        // And also fetch more message from sliding sync with a bigger limit
+        let list =
+            sync.list("visible_rooms_list").context("list `visible_rooms_list` isn't found")?;
+
+        Observable::set(&mut list.timeline_limit.write().unwrap(), Some(uint!(20)));
+
+        loop {
+            update_summary = stream
+                .next()
+                .await
+                .context("No update summary found, loop ended unsuccessfully")??;
+
+            if !update_summary.rooms.is_empty() {
+                break;
+            }
+        }
+
+        for item in timeline.items().await {
+            if let Some(event_item) = item.as_event() {
+                if let Some(remote_event_item) = event_item.as_remote() {
+                    if let Some(message) = remote_event_item.content().as_message() {
+                        println!("Item: {:?}", message.body());
+                        continue;
+                    }
+                }
+            }
+
+            println!("Item: {item:?}");
+        }
+
+        // Check that the last is the last one we sent
+        let items = timeline.items().await;
+        let last_item = items.last().unwrap().as_event().unwrap();
+        assert_eq!(last_item.content().as_message().unwrap().body(), "Message #20");
+
         Ok(())
     }
 }
