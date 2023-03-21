@@ -88,10 +88,11 @@ mod tests {
                 receipt::{ReceiptThread, ReceiptType},
                 room::message::RoomMessageEventContent,
             },
-            uint, TransactionId,
+            uint,
         },
         SlidingSyncList, SlidingSyncMode, SlidingSyncState,
     };
+    use tracing::info;
 
     use super::*;
 
@@ -1471,6 +1472,8 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
+        info!("Sent all messages, now syncing");
+
         let sync = sync_builder
             .clone()
             .add_list(
@@ -1503,22 +1506,25 @@ mod tests {
             }
         }
 
+        info!("Synced, initializing timeline");
+
         let room = sync.get_room(&room_id).expect("Failed to get the room");
         let timeline = room.timeline().await.unwrap();
 
         // Send a new message
         {
+            info!("Sending another message");
             let message = RoomMessageEventContent::text_plain("Message #5");
-
-            let txn_id = TransactionId::new();
-            timeline.send(message.into(), Some(&txn_id)).await;
+            timeline.send(message.into(), None).await;
         }
+
+        info!("Syncing again");
 
         // Fetch more message from sliding sync with a bigger limit
         let list =
             sync.list("visible_rooms_list").context("list `visible_rooms_list` isn't found")?;
 
-        Observable::set(&mut list.timeline_limit.write().unwrap(), Some(uint!(5)));
+        Observable::set(&mut list.timeline_limit.write().unwrap(), Some(uint!(10)));
 
         loop {
             update_summary = stream
@@ -1531,18 +1537,28 @@ mod tests {
             }
         }
 
+        info!("Done syncing");
+
         for item in timeline.items().await {
             if let Some(event_item) = item.as_event() {
                 if let Some(remote_event_item) = event_item.as_remote() {
                     if let Some(message) = remote_event_item.content().as_message() {
-                        println!("Remote Item: {:?}", message.body());
+                        println!(
+                            "Remote Item: {:?} event_id={:?}",
+                            message.body(),
+                            remote_event_item.event_id()
+                        );
                         continue;
                     }
                 }
 
                 if let Some(local_event_item) = event_item.as_local() {
                     if let Some(message) = local_event_item.content().as_message() {
-                        println!("Local Item: {:?}", message.body());
+                        println!(
+                            "Local Item: {:?} event_id={:?}",
+                            message.body(),
+                            local_event_item.event_id()
+                        );
                         continue;
                     }
                 }

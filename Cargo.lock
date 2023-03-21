@@ -4967,6 +4967,7 @@ dependencies = [
  "matrix-sdk",
  "matrix-sdk-integration-testing",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
