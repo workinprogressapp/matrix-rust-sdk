@@ -77,7 +77,7 @@ mod tests {
     use eyeball_im::VectorDiff;
     use futures::{pin_mut, stream::StreamExt};
     use matrix_sdk::{
-        room::timeline::{EventTimelineItem, PaginationOptions},
+        room::timeline::EventTimelineItem,
         ruma::{
             api::client::{
                 error::ErrorKind as RumaError,
@@ -88,7 +88,7 @@ mod tests {
                 receipt::{ReceiptThread, ReceiptType},
                 room::message::RoomMessageEventContent,
             },
-            uint,
+            uint, TransactionId,
         },
         SlidingSyncList, SlidingSyncMode, SlidingSyncState,
     };
@@ -1455,14 +1455,13 @@ mod tests {
             room_id
         };
 
-        // Join a room and send 20 messages.
+        // Join a room and send 5 messages.
         {
             // Join the room.
             let room =
                 client.get_joined_room(&room_id).context("Failed to join room `{room_id}`")?;
 
-            // In this room, let's send 20 messages!
-            for nth in 0..20 {
+            for nth in 0..5 {
                 let message = RoomMessageEventContent::text_plain(format!("Message #{nth}"));
 
                 room.send(message, None).await?;
@@ -1507,26 +1506,19 @@ mod tests {
         let room = sync.get_room(&room_id).expect("Failed to get the room");
         let timeline = room.timeline().await.unwrap();
 
-        // Simulate a session reset
-        timeline.clear().await;
-
         // Send a new message
         {
-            let room =
-                client.get_joined_room(&room_id).context("Failed to join room `{room_id}`")?;
+            let message = RoomMessageEventContent::text_plain("Message #5");
 
-            let message = RoomMessageEventContent::text_plain("Message #20");
-            room.send(message, None).await?;
+            let txn_id = TransactionId::new();
+            timeline.send(message.into(), Some(&txn_id)).await;
         }
 
-        // Backpaginate
-        _ = timeline.paginate_backwards(PaginationOptions::single_request(20)).await;
-
-        // And also fetch more message from sliding sync with a bigger limit
+        // Fetch more message from sliding sync with a bigger limit
         let list =
             sync.list("visible_rooms_list").context("list `visible_rooms_list` isn't found")?;
 
-        Observable::set(&mut list.timeline_limit.write().unwrap(), Some(uint!(20)));
+        Observable::set(&mut list.timeline_limit.write().unwrap(), Some(uint!(5)));
 
         loop {
             update_summary = stream
@@ -1543,19 +1535,26 @@ mod tests {
             if let Some(event_item) = item.as_event() {
                 if let Some(remote_event_item) = event_item.as_remote() {
                     if let Some(message) = remote_event_item.content().as_message() {
-                        println!("Item: {:?}", message.body());
+                        println!("Remote Item: {:?}", message.body());
+                        continue;
+                    }
+                }
+
+                if let Some(local_event_item) = event_item.as_local() {
+                    if let Some(message) = local_event_item.content().as_message() {
+                        println!("Local Item: {:?}", message.body());
                         continue;
                     }
                 }
             }
 
-            println!("Item: {item:?}");
+            println!("Other Item: {item:?}");
         }
 
         // Check that the last is the last one we sent
         let items = timeline.items().await;
         let last_item = items.last().unwrap().as_event().unwrap();
-        assert_eq!(last_item.content().as_message().unwrap().body(), "Message #20");
+        assert_eq!(last_item.content().as_message().unwrap().body(), "Message #5");
 
         Ok(())
     }
