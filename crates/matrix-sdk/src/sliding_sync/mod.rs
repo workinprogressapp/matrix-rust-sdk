@@ -1097,7 +1097,7 @@ impl SlidingSync {
     /// This stream will send requests and will handle responses automatically,
     /// hence updating the lists.
     #[allow(unknown_lints, clippy::let_with_type_underscore)] // triggered by instrument macro
-    #[instrument(name = "sync_stream", skip_all, parent = &self.inner.client.inner.root_span)]
+    #[instrument(name = "sync_stream", skip_all)]
     pub fn stream<'a>(&'a self) -> impl Stream<Item = Result<UpdateSummary, crate::Error>> + 'a {
         // Copy all the lists.
         let lists = Arc::new(Mutex::new(self.inner.lists.read().unwrap().clone()));

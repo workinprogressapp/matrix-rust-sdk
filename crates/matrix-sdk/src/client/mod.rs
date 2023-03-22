@@ -72,7 +72,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::broadcast;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::OnceCell;
-use tracing::{debug, error, field::display, info, instrument, trace, Instrument, Span};
+use tracing::{debug, error, info, instrument, trace, Instrument, Span};
 use url::Url;
 
 #[cfg(feature = "e2e-encryption")]
@@ -190,8 +190,6 @@ pub(crate) struct ClientInner {
     /// Client API UnknownToken error publisher. Allows the subscriber logout
     /// the user when any request fails because of an invalid access token
     pub(crate) unknown_token_error_sender: broadcast::Sender<UnknownToken>,
-    /// Root span for `tracing`.
-    pub(crate) root_span: Span,
 }
 
 #[cfg(not(tarpaulin_include))]
@@ -1241,16 +1239,6 @@ impl Client {
             }
         }
 
-        self.inner
-            .root_span
-            .record("user_id", display(&response.user_id))
-            .record("device_id", display(&response.device_id));
-
-        #[cfg(feature = "e2e-encryption")]
-        if let Some(key) = self.encryption().ed25519_key().await {
-            self.inner.root_span.record("ed25519_key", key);
-        }
-
         self.inner.base_client.receive_login_response(response).await?;
 
         Ok(())
@@ -1315,24 +1303,14 @@ impl Client {
     /// ```
     ///
     /// [`login`]: #method.login
-    #[instrument(skip_all, parent = &self.inner.root_span)]
+    #[instrument(skip_all)]
     pub async fn restore_session(&self, session: Session) -> Result<()> {
         debug!("Restoring session");
 
         let (meta, tokens) = session.into_parts();
 
-        self.inner
-            .root_span
-            .record("user_id", display(&meta.user_id))
-            .record("device_id", display(&meta.device_id));
-
         self.base_client().set_session_tokens(tokens);
         self.base_client().set_session_meta(meta).await?;
-
-        #[cfg(feature = "e2e-encryption")]
-        if let Some(key) = self.encryption().ed25519_key().await {
-            self.inner.root_span.record("ed25519_key", key);
-        }
 
         debug!("Done restoring session");
 
@@ -1518,7 +1496,7 @@ impl Client {
     /// client.register(request).await;
     /// # })
     /// ```
-    #[instrument(skip_all, parent = &self.inner.root_span)]
+    #[instrument(skip_all)]
     pub async fn register(
         &self,
         request: register::v3::Request,
@@ -1581,7 +1559,7 @@ impl Client {
     ///
     /// let response = client.sync_once(sync_settings).await.unwrap();
     /// # });
-    #[instrument(skip(self, definition), parent = &self.inner.root_span)]
+    #[instrument(skip(self, definition))]
     pub async fn get_or_upload_filter(
         &self,
         filter_name: &str,
@@ -2336,7 +2314,7 @@ impl Client {
     ///     .await;
     /// })
     /// ```
-    #[instrument(skip_all, parent = &self.inner.root_span)]
+    #[instrument(skip_all)]
     pub async fn sync_with_callback<C>(
         &self,
         sync_settings: crate::config::SyncSettings,
@@ -2492,7 +2470,7 @@ impl Client {
     /// # anyhow::Ok(()) });
     /// ```
     #[allow(unknown_lints, clippy::let_with_type_underscore)] // triggered by instrument macro
-    #[instrument(skip(self), parent = &self.inner.root_span)]
+    #[instrument(skip(self))]
     pub async fn sync_stream(
         &self,
         mut sync_settings: crate::config::SyncSettings,
