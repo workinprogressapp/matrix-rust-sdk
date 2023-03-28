@@ -4983,6 +4983,7 @@ dependencies = [
  "eyeball-im",
  "futures",
  "matrix-sdk",
+ "matrix-sdk-ffi",
  "matrix-sdk-integration-testing",
  "tokio",
  "uuid",

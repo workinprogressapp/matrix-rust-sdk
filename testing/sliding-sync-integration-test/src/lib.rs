@@ -1394,4 +1394,36 @@ mod tests {
         assert!(found_receipt);
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn new_test() -> anyhow::Result<()> {
+        let (_client, sync_proxy_builder) = random_setup_with_rooms(20).await?;
+        let sliding_window_list = SlidingSyncList::builder()
+            .sync_mode(SlidingSyncMode::Selective)
+            .set_range(0u32, 10u32)
+            .sort(vec!["by_recency".to_owned(), "by_name".to_owned()])
+            .name("sliding")
+            .build()?;
+        let sync_proxy = sync_proxy_builder.add_list(sliding_window_list).build().await?;
+        //let list = sync_proxy.list("sliding").context("but we just added that
+        // list!")?;
+        let stream = sync_proxy.stream();
+        pin_mut!(stream);
+        let room_summary =
+            stream.next().await.context("No room summary found, loop ended unsuccessfully")?;
+        let summary = room_summary?;
+        // we only heard about the ones we had asked for
+        assert_eq!(summary.rooms.len(), 11);
+
+        let client = matrix_sdk_ffi::Client::new(_client);
+        let slidy_ffi = matrix_sdk_ffi::SlidingSync::new(sync_proxy.clone(), client);
+        _ = slidy_ffi
+            .get_room(summary.rooms[0].to_string())
+            .unwrap()
+            .unwrap()
+            .latest_room_message()
+            .await;
+
+        Ok(())
+    }
 }

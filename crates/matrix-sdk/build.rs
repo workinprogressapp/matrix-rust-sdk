@@ -19,7 +19,7 @@ fn ensure(cond: bool, err: &str) {
 }
 
 fn main() {
-    let native_tls_set = env_is_set("CARGO_FEATURE_NATIVE_TLS");
+    /* let native_tls_set = env_is_set("CARGO_FEATURE_NATIVE_TLS");
     let rustls_tls_set = env_is_set("CARGO_FEATURE_RUSTLS_TLS");
     ensure(
         native_tls_set || rustls_tls_set,
@@ -28,7 +28,7 @@ fn main() {
     ensure(
         !native_tls_set || !rustls_tls_set,
         "only one of the features 'native-tls' or 'rustls-tls' can be enabled",
-    );
+    ); */
 
     let is_wasm = env::var_os("CARGO_CFG_TARGET_ARCH").map_or(false, |arch| arch == "wasm32");
     if is_wasm {

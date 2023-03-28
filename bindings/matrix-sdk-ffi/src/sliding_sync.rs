@@ -632,7 +632,7 @@ pub struct SlidingSync {
 }
 
 impl SlidingSync {
-    fn new(inner: matrix_sdk::SlidingSync, client: Client) -> Self {
+    pub fn new(inner: matrix_sdk::SlidingSync, client: Client) -> Self {
         Self { inner, client, observer: Default::default() }
     }
 

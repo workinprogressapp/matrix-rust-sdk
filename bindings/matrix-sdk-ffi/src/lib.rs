@@ -34,7 +34,7 @@ pub mod timeline;
 mod uniffi_api;
 
 pub use async_compat::TOKIO1 as RUNTIME;
-use client::Client;
+pub use client::Client;
 use client_builder::ClientBuilder;
 use matrix_sdk::{encryption::CryptoStoreError, HttpError, IdParseError};
 pub use matrix_sdk::{
