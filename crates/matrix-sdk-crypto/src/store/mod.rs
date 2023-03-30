@@ -39,7 +39,7 @@
 //! [`CryptoStore`]: trait.Cryptostore.html
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     ops::Deref,
     sync::{atomic::AtomicBool, Arc},
@@ -51,7 +51,8 @@ use atomic::Ordering;
 use dashmap::DashSet;
 use matrix_sdk_common::locks::Mutex;
 use ruma::{
-    events::secret::request::SecretName, DeviceId, OwnedDeviceId, OwnedRoomId, OwnedUserId, UserId,
+    events::secret::request::SecretName, serde::Raw, DeviceId, OwnedDeviceId, OwnedRoomId,
+    OwnedUserId, UserId,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
@@ -68,7 +69,7 @@ use crate::{
         InboundGroupSession, OlmMessageHash, OutboundGroupSession, PrivateCrossSigningIdentity,
         ReadOnlyAccount, Session,
     },
-    types::EventEncryptionAlgorithm,
+    types::{events::room_key_withheld::RoomKeyWithheldEvent, EventEncryptionAlgorithm},
     utilities::encode,
     verification::VerificationMachine,
     CrossSigningStatus,
@@ -92,7 +93,6 @@ pub use memorystore::MemoryStore;
 pub use traits::{CryptoStore, DynCryptoStore, IntoCryptoStore};
 
 pub use crate::gossiping::{GossipRequest, SecretInfo};
-use crate::store::withheld::DirectWithheldInfo;
 
 /// A wrapper for our CryptoStore trait object.
 ///
@@ -137,7 +137,7 @@ pub struct Changes {
     pub identities: IdentityChanges,
     pub devices: DeviceChanges,
     /// Stores when a `m.room_key.withheld` is received
-    pub withheld_session_info: Vec<DirectWithheldInfo>,
+    pub withheld_session_info: BTreeMap<OwnedRoomId, BTreeMap<String, Raw<RoomKeyWithheldEvent>>>,
     pub room_settings: HashMap<OwnedRoomId, RoomSettings>,
 }
 

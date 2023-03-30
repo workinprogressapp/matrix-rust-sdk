@@ -120,6 +120,15 @@ impl RoomKeyWithheldContent {
         }
     }
 
+    pub fn withheld_code(&self) -> WithheldCode {
+        match self {
+            RoomKeyWithheldContent::MegolmV1AesSha2(c) => c.withheld_code(),
+            #[cfg(feature = "experimental-algorithms")]
+            RoomKeyWithheldContent::MegolmV2AesSha2(c) => c.withheld_code(),
+            RoomKeyWithheldContent::Unknown(c) => c.code.to_owned(),
+        }
+    }
+
     /// Get the algorithm of the room key withheld.
     pub fn algorithm(&self) -> EventEncryptionAlgorithm {
         match &self {

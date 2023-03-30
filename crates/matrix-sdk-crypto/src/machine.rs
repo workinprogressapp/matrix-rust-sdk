@@ -80,7 +80,10 @@ use crate::{
                 RoomEventEncryptionScheme, SupportedEventEncryptionSchemes,
             },
             room_key::{MegolmV1AesSha2Content, RoomKeyContent},
-            room_key_withheld::RoomKeyWithheldEvent,
+            room_key_withheld::{
+                MegolmV1AesSha2WithheldContent, RoomKeyWithheldContent, RoomKeyWithheldEvent,
+                WithheldCode,
+            },
             ToDeviceEvents,
         },
         Signatures,
@@ -674,10 +677,22 @@ impl OlmMachine {
     async fn add_withheld_info(
         &self,
         changes: &mut Changes,
+        raw_event: &Raw<AnyToDeviceEvent>,
         event: &RoomKeyWithheldEvent,
     ) -> OlmResult<()> {
-        if let Some(info) = DirectWithheldInfo::from_event(event) {
-            changes.withheld_session_info.push(info)
+        match &event.content {
+            RoomKeyWithheldContent::MegolmV1AesSha2(c) => match c {
+                MegolmV1AesSha2WithheldContent::BlackListed(c)
+                | MegolmV1AesSha2WithheldContent::Unverified(c) => {
+                    changes
+                        .withheld_session_info
+                        .entry(c.room_id.to_owned())
+                        .or_insert_with(BTreeMap::default)
+                        .insert(c.session_id.to_owned(), raw_event.to_owned().cast());
+                }
+                _ => (),
+            },
+            _ => (),
         }
 
         Ok(())
@@ -919,6 +934,7 @@ impl OlmMachine {
     async fn handle_to_device_event(
         &self,
         changes: &mut Changes,
+        raw_event: &Raw<AnyToDeviceEvent>,
         event: &ToDeviceEvents,
     ) -> OlmResult<()> {
         use crate::types::events::ToDeviceEvents::*;
@@ -926,7 +942,7 @@ impl OlmMachine {
         match event {
             RoomKeyRequest(e) => self.key_request_machine.receive_incoming_key_request(e),
             SecretRequest(e) => self.key_request_machine.receive_incoming_secret_request(e),
-            RoomKeyWithheld(e) => self.add_withheld_info(changes, e).await?,
+            RoomKeyWithheld(e) => self.add_withheld_info(changes, raw_event, e).await?,
             KeyVerificationAccept(..)
             | KeyVerificationCancel(..)
             | KeyVerificationKey(..)
@@ -1029,7 +1045,8 @@ impl OlmMachine {
 
                 match decrypted.result.raw_event.deserialize_as() {
                     Ok(event) => {
-                        self.handle_to_device_event(changes, &event).await?;
+                        self.handle_to_device_event(changes, &decrypted.result.raw_event, &event)
+                            .await?;
 
                         raw_event = event
                             .serialize_zeroized()
@@ -1043,7 +1060,7 @@ impl OlmMachine {
                 }
             }
 
-            e => self.handle_to_device_event(changes, &e).await?,
+            e => self.handle_to_device_event(changes, &raw_event, &e).await?,
         }
 
         Ok(raw_event)
@@ -1261,7 +1278,7 @@ impl OlmMachine {
                             .store
                             .get_withheld_info(room_id, content.session_id())
                             .await?
-                            .map(|i| i.withheld_code());
+                            .map(|e| e.deserialize().unwrap().content.withheld_code());
 
                         if withheld_code.is_some() {
                             // Partially withheld, report with a withheld code if we have one.
@@ -1279,7 +1296,7 @@ impl OlmMachine {
                 .store
                 .get_withheld_info(room_id, content.session_id())
                 .await?
-                .map(|i| i.withheld_code());
+                .map(|e| e.deserialize().unwrap().content.withheld_code());
 
             Err(MegolmError::MissingRoomKey(withheld_code))
         }

@@ -30,12 +30,18 @@ use matrix_sdk_crypto::{
         caches::SessionStore, withheld::DirectWithheldInfo, BackupKeys, Changes, CryptoStore,
         CryptoStoreError, Result, RoomKeyCounts, RoomSettings,
     },
-    types::{events::room_key_request::SupportedKeyInfo, EventEncryptionAlgorithm},
+    types::{
+        events::{
+            room_key_request::SupportedKeyInfo,
+            room_key_withheld::{RoomKeyWithheldContent, RoomKeyWithheldEvent},
+        },
+        EventEncryptionAlgorithm,
+    },
     GossipRequest, ReadOnlyAccount, ReadOnlyDevice, ReadOnlyUserIdentities, SecretInfo,
     TrackedUser,
 };
 use matrix_sdk_store_encryption::StoreCipher;
-use ruma::{DeviceId, OwnedDeviceId, RoomId, TransactionId, UserId};
+use ruma::{serde::Raw, DeviceId, OwnedDeviceId, RoomId, TransactionId, UserId};
 use serde::{de::DeserializeOwned, Serialize};
 use sled::{
     transaction::{ConflictableTransactionError, TransactionError},
@@ -1076,13 +1082,13 @@ impl CryptoStore for SledCryptoStore {
         &self,
         room_id: &RoomId,
         session_id: &str,
-    ) -> Result<Option<DirectWithheldInfo>, Self::Error> {
+    ) -> Result<Option<Raw<RoomKeyWithheldEvent>>, Self::Error> {
         let key = self.encode_key(DIRECT_WITHHELD_INFO_TABLE, (session_id, room_id.as_str()));
         Ok(self
             .direct_withheld_info
             .get(key)
             .map_err(CryptoStoreError::backend)?
-            .map(|d| self.deserialize_value::<DirectWithheldInfo>(&d))
+            .map(|d| self.deserialize_value::<Raw<RoomKeyWithheldEvent>>(&d))
             .transpose()?)
     }
 
