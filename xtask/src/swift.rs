@@ -115,7 +115,25 @@ fn generate_uniffi(library_file: &Path, ffi_directory: &Path) -> Result<()> {
 }
 
 fn build_for_target(target: &str, profile: &str) -> Result<PathBuf> {
-    cmd!("cargo build -p matrix-sdk-ffi --target {target} --profile {profile}").run()?;
+    const MIN_IPHONE_VERSION: &str = "10.1";
+
+    let platform_dir = match target {
+        "aarch64-apple-ios" => {
+            format!("iPhoneOS.platform/Developer/SDKs/iPhoneOS{MIN_IPHONE_VERSION}.sdk")
+        }
+        // TODO: other targets
+        _ => panic!("this target is not supported"),
+    };
+
+    let mut cflags =
+        format!("-isysroot /Applications/Xcode.app/Contents/Developer/Platforms/{platform_dir}");
+    if target.contains("-ios") {
+        cflags += &format!(" -miphoneos-version-min={MIN_IPHONE_VERSION}");
+    }
+
+    cmd!("cargo build -p matrix-sdk-ffi --target {target} --profile {profile}")
+        .env("CFLAGS", cflags)
+        .run()?;
 
     // The builtin dev profile has its files stored under target/debug, all
     // other targets have matching directory names
@@ -175,7 +193,7 @@ fn build_xcframework(
         (vec![lipo_target_macos, lipo_target_sim, ios_path], darwin_x86_path)
     };
 
-    println!("-- Generating uniffi files");
+    println!("-- Generate uniffi files");
     generate_uniffi(&uniff_lib_path, &generated_dir)?;
 
     rename(generated_dir.join("matrix_sdk_ffiFFI.h"), headers_dir.join("matrix_sdk_ffiFFI.h"))?;
@@ -189,7 +207,7 @@ fn build_xcframework(
 
     rename(generated_dir.join("matrix_sdk_ffi.swift"), swift_dir.join("matrix_sdk_ffi.swift"))?;
 
-    println!("-- Generating MatrixSDKFFI.xcframework framework");
+    println!("-- Generate MatrixSDKFFI.xcframework framework");
     let xcframework_path = generated_dir.join("MatrixSDKFFI.xcframework");
     if xcframework_path.exists() {
         remove_dir_all(xcframework_path.as_path())?;
