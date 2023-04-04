@@ -2,15 +2,17 @@
 
 use std::{
     iter::{once, repeat},
+    pin::Pin,
+    task::Poll,
     time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context};
 use assert_matches::assert_matches;
 use eyeball_im::VectorDiff;
-use futures::{pin_mut, stream::StreamExt};
+use futures::{pin_mut, stream::StreamExt, Stream};
 use matrix_sdk::{
-    room::timeline::EventTimelineItem,
+    room::timeline::{EventTimelineItem, TimelineItem, VirtualTimelineItem},
     ruma::{
         api::client::{
             error::ErrorKind as RumaError,
@@ -1313,4 +1315,136 @@ async fn receipts_extension_works() -> anyhow::Result<()> {
     }
     assert!(found_receipt);
     Ok(())
+}
+
+#[tokio::test]
+async fn gappy_sync() -> anyhow::Result<()> {
+    let (client, sync_builder) = random_setup_with_rooms(1).await?;
+
+    let sync = sync_builder
+        .clone()
+        .add_list(
+            SlidingSyncList::builder()
+                .sync_mode(SlidingSyncMode::Selective)
+                .add_range(0u32, 1)
+                .timeline_limit(3u32)
+                .name("the_list")
+                .build()?,
+        )
+        .build()
+        .await?;
+
+    // Get the sync stream.
+    let stream = sync.stream();
+    pin_mut!(stream);
+
+    // Get the list to all rooms to check the list' state.
+    let list = sync.list("the_list").context("list `init_list` isn't found")?;
+    assert_eq!(list.state(), SlidingSyncState::NotLoaded);
+
+    // List one room.
+    let room_id = {
+        // Send the request and wait for a response.
+        let update_summary =
+            stream.next().await.context("No room summary found, loop ended unsuccessfully")??;
+
+        // Check the state has switched to `Live`.
+        assert_eq!(list.state(), SlidingSyncState::FullyLoaded);
+
+        // One room has received an update.
+        assert_eq!(update_summary.rooms.len(), 1);
+
+        // Let's fetch the room ID then.
+        let room_id = update_summary.rooms[0].clone();
+
+        // Let's fetch the room ID from the list too.
+        assert_matches!(list.room_list().get(0), Some(RoomListEntry::Filled(same_room_id)) => {
+            assert_eq!(same_room_id, &room_id);
+        });
+
+        room_id
+    };
+
+    let room = client.get_joined_room(&room_id).context("Failed to join room `{room_id}`")?;
+
+    // Test the `Timeline`.
+    let timeline = room.timeline().await;
+    let (_, mut timeline_stream) = timeline.subscribe().await;
+
+    // Send a few messages.
+    for nth in 1..=20 {
+        let message = RoomMessageEventContent::text_plain(format!("Message #{nth}"));
+        room.send(message, None).await?;
+    }
+
+    // Wait on the server to receive all the messages.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Sync to receive messages.
+    let update_summary = loop {
+        // Wait for a response.
+        let update_summary =
+            stream.next().await.context("No update summary found, loop ended unsuccessfully")??;
+
+        if !update_summary.rooms.is_empty() {
+            break update_summary;
+        }
+    };
+
+    // We see that one room has received an update, and it's our room!
+    assert_eq!(update_summary.rooms.len(), 1);
+    assert_eq!(room_id, update_summary.rooms[0]);
+
+    // Let's fetch the room ID from the list too.
+    assert_matches!(list.room_list().get(0), Some(RoomListEntry::Filled(same_room_id)) => {
+        assert_eq!(same_room_id, &room_id);
+    });
+
+    // Wait on the server to receive all the messages.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let fst = assert_matches!(
+        timeline_stream.next().await,
+        Some(VectorDiff::PushBack { value }) => value
+    );
+    assert_matches!(*fst, TimelineItem::Virtual(VirtualTimelineItem::DayDivider(_)));
+
+    let messages: Vec<_> = ready(timeline_stream)
+        .map(|diff| {
+            assert_matches!(diff, VectorDiff::PushBack { value } => value)
+                .as_event()
+                .unwrap()
+                .content()
+                .as_message()
+                .unwrap()
+                .body()
+                .to_owned()
+        })
+        .collect()
+        .await;
+
+    assert_eq!(messages, (1..=20).map(|idx| format!("Message #{idx}")).collect::<Vec<_>>());
+
+    Ok(())
+}
+
+fn ready<T: Stream>(stream: T) -> Ready<T> {
+    Ready(stream)
+}
+
+struct Ready<T>(T);
+
+impl<T: Stream + Unpin> Stream for Ready<T> {
+    type Item = T::Item;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let result = match Pin::new(&mut self.0).poll_next(cx) {
+            Poll::Ready(r) => r,
+            Poll::Pending => None,
+        };
+        Poll::Ready(result)
+    }
 }
